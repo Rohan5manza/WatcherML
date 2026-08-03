@@ -1,23 +1,39 @@
-Library
-/
-index.html
-
-
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#06172b" />
-  <meta name="description" content="WatcherML — proactive ML experiment forensics and bounded recovery campaigns." />
+  <meta
+    name="description"
+    content="WatcherML — proactive ML experiment forensics and bounded recovery campaigns."
+  />
+
   <title>WatcherML — ML Experiment Forensics</title>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=blue-v2" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    rel="preconnect"
+    href="https://fonts.gstatic.com"
+    crossorigin
+  />
+
+  <!-- WatcherML browser favicon -->
+  <link
+    rel="icon"
+    href="/static/assets/favicon.svg"
+    type="image/svg+xml"
+  />
+
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet"
+  />
+
+  <link
+    rel="stylesheet"
+    href="/static/styles.css?v=blue-v2"
+  />
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -30,13 +46,26 @@ index.html
 
   <div class="shell">
     <nav class="sidebar" id="sidebar" aria-label="Primary navigation">
-      <a class="brand" href="#/" aria-label="WatcherML overview">
-        <span class="brand-mark" aria-hidden="true">W</span>
-        <span class="brand-copy">
-          <span class="brand-name">WatcherML</span>
-          <span class="brand-kicker">forensics console</span>
-        </span>
-      </a>
+      <a
+  class="brand"
+  href="#/"
+  aria-label="WatcherML overview"
+>
+ <span class="brand-mark" aria-hidden="true">
+  <img
+    class="brand-mark-image"
+    src="/static/assets/favicon.svg"
+    alt=""
+    width="40"
+    height="40"
+  />
+</span>
+
+  <span class="brand-copy">
+    <span class="brand-name">WatcherML</span>
+    <span class="brand-kicker">forensics console</span>
+  </span>
+</a>
 
       <div class="sidebar-nav" id="sidebar-nav">
         <a href="#/" data-route="overview" title="Overview">
