@@ -1,0 +1,7 @@
+.watcherml/
+examples/*.zip
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
