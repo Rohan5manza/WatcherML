@@ -141,22 +141,55 @@ def _parse_json_object(raw: Optional[str], required_key: Optional[str] = None) -
     return parsed
 
 
+MAX_JSON_ATTEMPTS = 2  # confirmed via real testing: llama3.2:1b failed to produce
+# parseable JSON on 2 of 5 identical calls -- small models are inconsistent about
+# following "respond with ONLY JSON" instructions call-to-call, not just occasionally.
+
+
+def _chat_json(messages: list, required_key: str, model: str = DEFAULT_MODEL,
+               host: str = DEFAULT_HOST, keep_alive: Optional[int] = None,
+               max_attempts: int = MAX_JSON_ATTEMPTS) -> Optional[dict]:
+    """Calls the model and parses JSON, retrying if the response didn't parse.
+    The model is kept warm (keep_alive left at Ollama's default) across retries
+    within this call -- the caller-supplied keep_alive is only applied on the
+    final attempt, so a retry doesn't pay a second full reload cost on top of
+    the first, while the GPU still gets freed by the time this function returns.
+    """
+    conversation = list(messages)
+    for attempt in range(max_attempts):
+        is_last = attempt == max_attempts - 1
+        raw = _chat(conversation, model=model, host=host,
+                    keep_alive=keep_alive if is_last else None)
+        parsed = _parse_json_object(raw, required_key=required_key)
+        if parsed is not None:
+            return parsed
+        if not is_last:
+            conversation = messages + [
+                {"role": "assistant", "content": raw or ""},
+                {"role": "user", "content": (
+                    f"That wasn't valid JSON, or was missing the required \"{required_key}\" "
+                    "key. Respond again with ONLY a JSON object, no other text."
+                )},
+            ]
+    return None
+
+
 def suggest_next_config(run_history: list, goal_metric: str, goal_direction: str = "maximize",
                          model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST) -> Optional[dict]:
     """Suggest the next config to try, given run history. Returns None if unavailable
-    or unparseable -- callers must have a non-LLM fallback and must never block on this.
+    or unparseable after retrying -- callers must have a non-LLM fallback and must
+    never block on this.
     """
     prompt = (
         f"Goal: {goal_direction} '{goal_metric}'.\n"
         f"Run history (oldest first): {json.dumps(run_history)}\n\n"
         "Propose the next config as a JSON object: {\"config\": {...}, \"rationale\": \"...\"}"
     )
-    raw = _chat(
+    return _chat_json(
         [{"role": "system", "content": _SUGGEST_SYSTEM_PROMPT},
          {"role": "user", "content": prompt}],
-        model=model, host=host,
+        required_key="config", model=model, host=host,
     )
-    return _parse_json_object(raw, required_key="config")
 
 
 # ============================================================================
@@ -181,14 +214,14 @@ _HYPOTHESIS_SYSTEM_PROMPT = (
 def rank_memory_hypotheses(observation: dict, model: str = DEFAULT_MODEL,
                             host: str = DEFAULT_HOST, keep_alive: Optional[int] = 0) -> Optional[list]:
     """Diagnostician role. Returns a list of hypothesis dicts, or None if
-    Ollama is unavailable or the response didn't parse -- caller must fall back."""
+    Ollama is unavailable or the response didn't parse after retrying --
+    caller must fall back."""
     prompt = f"Observation report:\n{json.dumps(observation, indent=2)}\n\nRank the likely causes."
-    raw = _chat(
+    parsed = _chat_json(
         [{"role": "system", "content": _HYPOTHESIS_SYSTEM_PROMPT},
          {"role": "user", "content": prompt}],
-        model=model, host=host, keep_alive=keep_alive,
+        required_key="hypotheses", model=model, host=host, keep_alive=keep_alive,
     )
-    parsed = _parse_json_object(raw, required_key="hypotheses")
     if parsed is None or not isinstance(parsed.get("hypotheses"), list):
         return None
     return parsed["hypotheses"]
@@ -214,19 +247,19 @@ def propose_recovery_patches(observation: dict, hypotheses: list, base_config: d
                               keep_alive: Optional[int] = 0) -> Optional[list]:
     """Planner role. Returns a list of {"patch", "rationale", "confidence"} dicts,
     UNVALIDATED -- recovery.py's policy engine must filter these before use.
-    Returns None if Ollama is unavailable or the response didn't parse."""
+    Returns None if Ollama is unavailable or the response didn't parse after
+    retrying."""
     prompt = (
         f"Current config: {json.dumps(base_config)}\n"
         f"Observation: {json.dumps(observation, indent=2)}\n"
         f"Ranked hypotheses: {json.dumps(hypotheses, indent=2)}\n\n"
         "Propose 2-3 candidate patches."
     )
-    raw = _chat(
+    parsed = _chat_json(
         [{"role": "system", "content": _RECOVERY_PLANNER_SYSTEM_PROMPT},
          {"role": "user", "content": prompt}],
-        model=model, host=host, keep_alive=keep_alive,
+        required_key="candidates", model=model, host=host, keep_alive=keep_alive,
     )
-    parsed = _parse_json_object(raw, required_key="candidates")
     if parsed is None or not isinstance(parsed.get("candidates"), list):
         return None
     return parsed["candidates"]
