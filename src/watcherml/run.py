@@ -54,7 +54,8 @@ class Run:
         if not self.gpu_info.get("available"):
             self.warnings.append("No GPU detected; running in CPU-only / no-GPU mode.")
 
-        self.sampler = collectors.SystemSampler(interval_seconds=self.sample_interval)
+        self.sampler = collectors.SystemSampler(
+            interval_seconds=self.sample_interval, on_sample=self._flush_sample)
         self.sampler.start()
 
         self.storage.upsert_run(
@@ -68,6 +69,16 @@ class Run:
             gpu_json=self.gpu_info,
         )
         return self
+
+    def _flush_sample(self, sample: dict):
+        """Called from the sampler's background thread after every sample --
+        this is what makes system telemetry visible in the UI *during*
+        training, not only after the run finishes. Best-effort: a storage
+        hiccup here must never interrupt the actual training loop."""
+        try:
+            self.storage.save_resource_samples(self.run_id, [sample])
+        except Exception:
+            pass
 
     def set_dataset(self, path: str):
         self.dataset_fingerprint = collectors.dataset_fingerprint(path)
@@ -154,8 +165,8 @@ class Run:
             dataset_fingerprint=self.dataset_fingerprint,
             warnings_json=self.warnings,
         )
-        if self.sampler:
-            self.storage.save_resource_samples(self.run_id, self.sampler.stats.samples)
+        # Samples are no longer batch-inserted here -- they were already
+        # persisted live, one at a time, via _flush_sample() as they were taken.
         self.storage.save_failure(
             self.run_id, capsule["exception_type"], capsule["message"],
             capsule["traceback"], capsule["diagnosis"], capsule["evidence"],
@@ -181,8 +192,8 @@ class Run:
             reproduction_score=score,
             warnings_json=self.warnings,
         )
-        if self.sampler:
-            self.storage.save_resource_samples(self.run_id, self.sampler.stats.samples)
+        # Samples are no longer batch-inserted here -- they were already
+        # persisted live, one at a time, via _flush_sample() as they were taken.
         self._print_receipt(duration, resource_summary, score)
 
     def _reproduction_score(self) -> float:

@@ -102,6 +102,10 @@ class Storage:
                     gpu_mem_used_mib REAL
                 )
             """)
+            self._migrate_add_column("resource_samples", "disk_read_mbps", "REAL")
+            self._migrate_add_column("resource_samples", "disk_write_mbps", "REAL")
+            self._migrate_add_column("resource_samples", "net_sent_mbps", "REAL")
+            self._migrate_add_column("resource_samples", "net_recv_mbps", "REAL")
             c.execute("""
                 CREATE TABLE IF NOT EXISTS recovery_campaigns (
                     campaign_id TEXT PRIMARY KEY,
@@ -246,13 +250,16 @@ class Storage:
             return
         rows = [
             (run_id, s.get("t"), s.get("cpu_pct"), s.get("ram_pct"),
-             s.get("gpu_util_pct"), s.get("gpu_mem_used_mib"))
+             s.get("gpu_util_pct"), s.get("gpu_mem_used_mib"),
+             s.get("disk_read_mbps"), s.get("disk_write_mbps"),
+             s.get("net_sent_mbps"), s.get("net_recv_mbps"))
             for s in samples
         ]
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO resource_samples (run_id, t, cpu_pct, ram_pct, gpu_util_pct, gpu_mem_used_mib) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO resource_samples (run_id, t, cpu_pct, ram_pct, gpu_util_pct, "
+                "gpu_mem_used_mib, disk_read_mbps, disk_write_mbps, net_sent_mbps, net_recv_mbps) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
             self._conn.commit()

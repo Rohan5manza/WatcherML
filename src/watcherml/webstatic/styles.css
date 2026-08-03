@@ -985,3 +985,89 @@ table.runs-table tr:last-child td { border-bottom: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ========================================================================
+   Live telemetry additions -- only new rules needed to support the
+   live-polling run detail page and real per-metric line charts in app.js.
+   Nothing above this line was changed.
+   ======================================================================== */
+
+.trace-legend {
+  display: flex;
+  gap: 16px;
+  margin: 6px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.trace-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.trace-legend span i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.metric-chart {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius);
+  padding: 14px 14px 10px;
+  margin-bottom: 14px;
+}
+.metric-chart:last-child { margin-bottom: 0; }
+.metric-chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.metric-chart-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.metric-chart-latest {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--signal-mint-bright);
+}
+.metric-chart-xaxis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+.metric-chart-empty {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+  padding: 10px 0;
+}
+
+.sortable-th { cursor: pointer; user-select: none; }
+.sortable-th:hover { color: var(--signal-mint); }
+
+.overlay-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 16px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+.overlay-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.overlay-legend span i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.overlay-legend a:hover { color: var(--signal-mint); }

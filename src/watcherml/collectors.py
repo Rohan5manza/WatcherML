@@ -167,13 +167,23 @@ class SamplerStats:
 
 
 class SystemSampler:
-    """Samples CPU/RAM/GPU on a background thread at a fixed interval."""
+    """Samples CPU/RAM/GPU on a background thread at a fixed interval.
 
-    def __init__(self, interval_seconds: float = 2.0):
+    on_sample, if given, is called with each raw sample dict as it's taken --
+    this is what lets a run's telemetry be persisted (and therefore visible
+    in the UI) *while training is still in progress*, not only after the run
+    ends. A callback failure never kills the sampling thread or the run.
+    """
+
+    def __init__(self, interval_seconds: float = 2.0, on_sample=None):
         self.interval = interval_seconds
         self.stats = SamplerStats()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._on_sample = on_sample
+        self._prev_disk_io = None  # psutil counters are cumulative -- we report rates
+        self._prev_net_io = None   # (MB/s), computed as the delta between consecutive samples
+        self._prev_t = None
 
     def start(self):
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -181,17 +191,45 @@ class SystemSampler:
 
     def _loop(self):
         while not self._stop_event.is_set():
-            sample = {"t": time.time()}
+            now = time.time()
+            sample = {"t": now}
             if psutil is not None:
                 sample["cpu_pct"] = psutil.cpu_percent(interval=None)
                 sample["ram_pct"] = psutil.virtual_memory().percent
+                self._sample_io_rates(sample, now)
             gpu = _sample_gpu_once()
             if gpu:
                 sample["gpu_util_pct"] = gpu["util_pct"]
                 sample["gpu_mem_used_mib"] = gpu["mem_used_mib"]
                 sample["gpu_temp_c"] = gpu["temp_c"]
             self.stats.samples.append(sample)
+            if self._on_sample is not None:
+                try:
+                    self._on_sample(sample)
+                except Exception:
+                    pass  # live telemetry is best-effort -- never let it disrupt training
             self._stop_event.wait(self.interval)
+
+    def _sample_io_rates(self, sample: dict, now: float):
+        """Disk/network throughput, in MB/s, computed as the delta between
+        consecutive cumulative-counter reads. First sample in a run has
+        nothing to diff against, so it's skipped (no rate yet, not zero)."""
+        try:
+            disk_io = psutil.disk_io_counters()
+            net_io = psutil.net_io_counters()
+        except Exception:
+            return  # not available on this platform/permissions -- degrade silently
+        if disk_io is None or net_io is None:
+            return
+        if self._prev_t is not None and now > self._prev_t:
+            dt = now - self._prev_t
+            sample["disk_read_mbps"] = (disk_io.read_bytes - self._prev_disk_io.read_bytes) / dt / 1e6
+            sample["disk_write_mbps"] = (disk_io.write_bytes - self._prev_disk_io.write_bytes) / dt / 1e6
+            sample["net_sent_mbps"] = (net_io.bytes_sent - self._prev_net_io.bytes_sent) / dt / 1e6
+            sample["net_recv_mbps"] = (net_io.bytes_recv - self._prev_net_io.bytes_recv) / dt / 1e6
+        self._prev_disk_io = disk_io
+        self._prev_net_io = net_io
+        self._prev_t = now
 
     def stop(self) -> dict:
         self._stop_event.set()

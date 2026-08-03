@@ -3,6 +3,14 @@
 
 const app = document.getElementById("app");
 const routeProgress = document.getElementById("route-progress");
+let activePollTimer = null;
+
+function stopActivePoll() {
+  if (activePollTimer) {
+    clearInterval(activePollTimer);
+    activePollTimer = null;
+  }
+}
 
 function notify(message, kind = "success", timeout = 3200) {
   const region = document.getElementById("toast-region");
@@ -180,30 +188,189 @@ function provenance(kind) {
 
 function renderTrace(samples, containerLabel) {
   if (!samples || samples.length < 2) {
+    const n = samples ? samples.length : 0;
     return `<div class="trace"><div class="trace-label"><span>${containerLabel}</span></div>
-      <div class="trace-empty">not enough samples recorded for a trace (very short run)</div></div>`;
+      <div class="trace-empty">only ${n} sample${n === 1 ? "" : "s"} recorded so far -- telemetry is
+      sampled every couple seconds, so very short runs may not have enough points yet for a trace.
+      ${n > 0 ? "This updates live while the run is active -- refresh or wait a moment." : ""}</div></div>`;
   }
   const hasGpu = samples.some((s) => s.gpu_util_pct !== null && s.gpu_util_pct !== undefined);
-  const key = hasGpu ? "gpu_util_pct" : "cpu_pct";
-  const label = hasGpu ? "gpu utilization %" : "cpu utilization % (no gpu detected)";
-  const values = samples.map((s) => (s[key] === null || s[key] === undefined ? 0 : s[key]));
+  const hasCpu = samples.some((s) => s.cpu_pct !== null && s.cpu_pct !== undefined);
   const t0 = samples[0].t;
   const tSpan = Math.max(1, samples[samples.length - 1].t - t0);
-  const W = 1000, H = 64, PAD = 4;
-  const points = samples.map((s, i) => {
-    const x = PAD + ((s.t - t0) / tSpan) * (W - PAD * 2);
-    const y = H - PAD - (Math.min(100, Math.max(0, values[i])) / 100) * (H - PAD * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  const gridLines = [0.25, 0.5, 0.75].map((f) =>
-    `<line x1="0" x2="${W}" y1="${H * f}" y2="${H * f}" stroke="var(--border-hairline)" stroke-width="1"/>`
-  ).join("");
-  return `<div class="trace">
-    <div class="trace-label"><span>${containerLabel} -- ${label}</span><span>${samples.length} samples</span></div>
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${gridLines}
-      <polyline points="${points}" fill="none" stroke="var(--signal-mint)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-    </svg>
+  const W = 1000, H = 130, PAD_L = 34, PAD_R = 10, PAD_T = 8, PAD_B = 20;
+
+  function toPath(key, color) {
+    const pts = [];
+    samples.forEach((s) => {
+      const v = s[key];
+      if (v === null || v === undefined) return;
+      const x = PAD_L + ((s.t - t0) / tSpan) * (W - PAD_L - PAD_R);
+      const y = H - PAD_B - (Math.min(100, Math.max(0, v)) / 100) * (H - PAD_T - PAD_B);
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    });
+    if (pts.length < 2) return "";
+    return `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }
+
+  const gpuPath = hasGpu ? toPath("gpu_util_pct", "var(--signal-mint)") : "";
+  const cpuPath = hasCpu ? toPath("cpu_pct", "var(--signal-cyan)") : "";
+
+  const yTicks = [0, 50, 100].map((v) => {
+    const y = H - PAD_B - (v / 100) * (H - PAD_T - PAD_B);
+    return `<line x1="${PAD_L}" x2="${W - PAD_R}" y1="${y}" y2="${y}" stroke="rgba(109,125,147,.18)" stroke-width="1"/>
+            <text x="${PAD_L - 6}" y="${y + 3}" text-anchor="end" font-size="9" fill="var(--ink-faint)" font-family="var(--font-mono)">${v}%</text>`;
+  }).join("");
+
+  const fmtElapsed = (sec) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, "0")}`;
+  const xLabels = `
+    <text x="${PAD_L}" y="${H - 4}" font-size="9" fill="var(--ink-faint)" font-family="var(--font-mono)">0:00</text>
+    <text x="${W - PAD_R}" y="${H - 4}" text-anchor="end" font-size="9" fill="var(--ink-faint)" font-family="var(--font-mono)">${fmtElapsed(tSpan)} elapsed</text>`;
+
+  const legend = `<div class="trace-legend">
+    ${hasGpu ? `<span><i style="background:var(--signal-mint)"></i>GPU utilization</span>` : ""}
+    ${hasCpu ? `<span><i style="background:var(--signal-cyan)"></i>CPU utilization</span>` : ""}
   </div>`;
+
+  const vramSamples = samples.filter((s) => s.gpu_mem_used_mib !== null && s.gpu_mem_used_mib !== undefined);
+  let vramSection = "";
+  if (vramSamples.length >= 2) {
+    const vVals = vramSamples.map((s) => s.gpu_mem_used_mib);
+    const vMax = Math.max(...vVals) * 1.15 || 1;
+    const VH = 44;
+    const vPts = vramSamples.map((s) => {
+      const x = PAD_L + ((s.t - t0) / tSpan) * (W - PAD_L - PAD_R);
+      const y = VH - (s.gpu_mem_used_mib / vMax) * (VH - 6) - 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    vramSection = `
+      <div class="trace-label" style="margin-top:10px;"><span>VRAM used</span><span>peak ${Math.max(...vVals).toFixed(0)} MiB</span></div>
+      <svg viewBox="0 0 ${W} ${VH}" style="width:100%; height:${VH}px; display:block;">
+        <polyline points="${vPts}" fill="none" stroke="var(--signal-violet)" stroke-width="1.5"/>
+      </svg>`;
+  }
+
+  const diskSection = samples.some((s) => s.disk_read_mbps !== null && s.disk_read_mbps !== undefined)
+    ? renderRateMiniChart(samples, [
+        { key: "disk_read_mbps", label: "read", color: "var(--signal-mint)" },
+        { key: "disk_write_mbps", label: "write", color: "var(--signal-amber)" },
+      ], "Disk I/O") : "";
+  const netSection = samples.some((s) => s.net_sent_mbps !== null && s.net_sent_mbps !== undefined)
+    ? renderRateMiniChart(samples, [
+        { key: "net_sent_mbps", label: "sent", color: "var(--signal-cyan)" },
+        { key: "net_recv_mbps", label: "received", color: "var(--signal-violet)" },
+      ], "Network I/O") : "";
+
+  return `<div class="trace">
+    <div class="trace-label"><span>${containerLabel}</span><span>${samples.length} samples over ${fmtElapsed(tSpan)}</span></div>
+    ${legend}
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:${H}px; display:block;">
+      ${yTicks}${gpuPath}${cpuPath}${xLabels}
+    </svg>
+    ${vramSection}
+    ${diskSection}
+    ${netSection}
+  </div>`;
+}
+
+function renderRateMiniChart(samples, seriesDefs, title) {
+  const t0 = samples[0].t;
+  const tSpan = Math.max(1, samples[samples.length - 1].t - t0);
+  const W = 1000, H = 70, PAD_L = 46, PAD_R = 10, PAD_T = 6, PAD_B = 16;
+  const allVals = [];
+  seriesDefs.forEach((sd) => samples.forEach((s) => {
+    if (s[sd.key] !== null && s[sd.key] !== undefined) allVals.push(s[sd.key]);
+  }));
+  if (!allVals.length) return "";
+  const maxV = Math.max(...allVals, 0.001) * 1.15;
+
+  const paths = seriesDefs.map((sd) => {
+    const pts = [];
+    samples.forEach((s) => {
+      const v = s[sd.key];
+      if (v === null || v === undefined) return;
+      const x = PAD_L + ((s.t - t0) / tSpan) * (W - PAD_L - PAD_R);
+      const y = H - PAD_B - (Math.max(0, v) / maxV) * (H - PAD_T - PAD_B);
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    });
+    if (pts.length < 2) return "";
+    return `<polyline points="${pts.join(" ")}" fill="none" stroke="${sd.color}" stroke-width="1.6"/>`;
+  }).join("");
+
+  const legend = seriesDefs.map((sd) => `<span><i style="background:${sd.color}"></i>${esc(sd.label)}</span>`).join("");
+  const yLabel = `<text x="${PAD_L - 6}" y="${PAD_T + 8}" text-anchor="end" font-size="9" fill="var(--ink-faint)" font-family="var(--font-mono)">${fmtNum(maxV, 1)} MB/s</text>`;
+
+  return `
+    <div class="trace-label" style="margin-top:10px;"><span>${esc(title)}</span></div>
+    <div class="trace-legend">${legend}</div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:${H}px; display:block;">${yLabel}${paths}</svg>`;
+}
+
+// -------------------- per-metric line charts (real training curves) --------------------
+
+const METRIC_CHART_COLORS = ["var(--signal-mint)", "var(--signal-cyan)", "var(--signal-violet)", "var(--signal-amber)"];
+
+function renderMetricChart(name, points, color) {
+  if (!points || points.length === 0) {
+    return `<div class="metric-chart-empty">${esc(name)}: no data</div>`;
+  }
+  const sorted = [...points].sort((a, b) => (a.step ?? a.timestamp) - (b.step ?? b.timestamp));
+  const values = sorted.map((p) => p.value);
+  const xs = sorted.map((p, i) => (p.step !== null && p.step !== undefined ? p.step : i));
+
+  if (values.length === 1) {
+    return `<div class="metric-chart">
+      <div class="metric-chart-head"><span class="metric-chart-name">${esc(name)}</span><span class="metric-chart-latest">${fmtNum(values[0])}</span></div>
+      <p class="ai-empty" style="margin-top:8px;">Only one value logged so far -- a trend line needs at least two points.</p>
+    </div>`;
+  }
+
+  const W = 620, H = 170, PAD_L = 50, PAD_R = 12, PAD_T = 12, PAD_B = 24;
+  const minV = Math.min(...values), maxV = Math.max(...values);
+  const span = (maxV - minV) || Math.abs(maxV || 1) * 0.1 || 1;
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const xSpan = (maxX - minX) || 1;
+
+  const coords = sorted.map((p, i) => ({
+    x: PAD_L + ((xs[i] - minX) / xSpan) * (W - PAD_L - PAD_R),
+    y: H - PAD_B - ((p.value - minV) / span) * (H - PAD_T - PAD_B),
+    value: p.value,
+    step: xs[i],
+  }));
+  const linePoints = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+
+  const yTicks = [0, 0.5, 1].map((f) => {
+    const val = minV + span * f;
+    const y = H - PAD_B - f * (H - PAD_T - PAD_B);
+    return `<line x1="${PAD_L}" x2="${W - PAD_R}" y1="${y}" y2="${y}" stroke="rgba(109,125,147,.16)" stroke-width="1"/>
+            <text x="${PAD_L - 8}" y="${y + 3}" text-anchor="end" font-size="9.5" fill="var(--ink-faint)" font-family="var(--font-mono)">${fmtNum(val, 3)}</text>`;
+  }).join("");
+
+  const dots = coords.map((c) => `
+    <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.2" fill="${color}" stroke="#0d151d" stroke-width="1.3">
+      <title>step ${c.step}: ${fmtNum(c.value)}</title>
+    </circle>`).join("");
+
+  return `<div class="metric-chart">
+    <div class="metric-chart-head">
+      <span class="metric-chart-name">${esc(name)}</span>
+      <span class="metric-chart-latest">${fmtNum(values[values.length - 1])}</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:${H}px; display:block;">
+      ${yTicks}
+      <polyline points="${linePoints}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${dots}
+    </svg>
+    <div class="metric-chart-xaxis"><span>step ${xs[0]}</span><span>step ${xs[xs.length - 1]}</span></div>
+  </div>`;
+}
+
+function renderAllMetricCharts(metricsOverTime) {
+  const names = Object.keys(metricsOverTime || {});
+  if (!names.length) return `<p class="ai-empty">no metrics logged</p>`;
+  return names.map((name, i) =>
+    renderMetricChart(name, metricsOverTime[name], METRIC_CHART_COLORS[i % METRIC_CHART_COLORS.length])
+  ).join("");
 }
 
 function renderSparkline(values, color = "var(--signal-mint)") {
@@ -248,9 +415,11 @@ const routes = [
   [/^#\/failure\/([^/]+)$/, "failures", (m) => renderFailureScreen(decodeURIComponent(m[1]))],
   [/^#\/campaign\/([^/]+)$/, "campaigns", (m) => renderCampaignScreen(decodeURIComponent(m[1]))],
   [/^#\/compare$/, "runs", () => renderCompareScreen(new URLSearchParams(location.hash.split("?")[1]))],
+  [/^#\/overlay$/, "runs", () => renderOverlayScreen(new URLSearchParams(location.hash.split("?")[1]))],
 ];
 
 function route() {
+  stopActivePoll();
   startRouteProgress();
   const hash = location.hash || "#/";
   const path = hash.split("?")[0];
@@ -315,6 +484,7 @@ async function renderOverviewScreen() {
     </tr>`).join("");
 
   app.innerHTML = `
+    <p class="eyebrow">watcherml</p>
     <h1 class="page-title">Overview</h1>
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-label">Projects</div><div class="stat-value">${ov.project_count}</div></div>
@@ -386,8 +556,16 @@ async function renderGlobalRunsScreen(params) {
   renderRunsTable(runs, "watcherml", null, status);
 }
 
+let runsTableSort = { key: null, dir: 1 };
+const MAX_OVERLAY_RUNS = 6;
+
+function _sortValue(row, key) {
+  if (key.startsWith("metric:")) return row.final_metrics[key.slice(7)];
+  return row[key];
+}
+
 function renderRunsTable(runs, crumbHtml, project, currentStatusFilter) {
-  const metricNames = [...new Set(runs.flatMap((r) => Object.keys(r.final_metrics || {})))].slice(0, 2);
+  const metricNames = [...new Set(runs.flatMap((r) => Object.keys(r.final_metrics || {})))].slice(0, 4);
   const filterBar = project ? "" : `
     <div class="filter-bar">
       <span>filter:</span>
@@ -396,20 +574,48 @@ function renderRunsTable(runs, crumbHtml, project, currentStatusFilter) {
       <a href="#/runs?status=success" style="${currentStatusFilter === 'success' ? 'color:var(--signal-mint)' : ''}">success</a>
     </div>`;
 
+  const sorted = [...runs];
+  if (runsTableSort.key) {
+    sorted.sort((a, b) => {
+      const va = _sortValue(a, runsTableSort.key), vb = _sortValue(b, runsTableSort.key);
+      if (va === null || va === undefined) return 1;
+      if (vb === null || vb === undefined) return -1;
+      if (va < vb) return -1 * runsTableSort.dir;
+      if (va > vb) return 1 * runsTableSort.dir;
+      return 0;
+    });
+  }
+
+  const sortableHeader = (label, key) => {
+    const active = runsTableSort.key === key;
+    const arrow = active ? (runsTableSort.dir === 1 ? " &#9650;" : " &#9660;") : "";
+    return `<th class="sortable-th" data-sort-key="${esc(key)}" title="Click to sort">${esc(label)}${arrow}</th>`;
+  };
+
   app.innerHTML = `
     <p class="eyebrow">${crumbHtml}</p>
     <h1 class="page-title">${project ? esc(project) : "Runs"}</h1>
     ${filterBar}
-    ${project ? `<div class="compare-picker"><span>select two runs to compare:</span><button id="compare-btn" disabled>Compare selected</button></div>` : ""}
+    ${project ? `<div class="compare-picker">
+      <span>select 2+ runs to compare or overlay their metrics:</span>
+      <button id="compare-btn" disabled>Compare selected (2)</button>
+      <button id="overlay-btn" disabled>Overlay metrics</button>
+    </div>` : ""}
     <div class="panel">
+      <div class="runs-table-wrapper">
       <table class="runs-table">
         <thead><tr>
-          ${project ? "<th></th>" : ""}<th>run</th><th>status</th><th>started</th><th>duration</th>
-          ${metricNames.map((m) => `<th>${esc(m)}</th>`).join("")}
-          <th>hardware</th><th>warnings</th>
+          ${project ? "<th></th>" : ""}
+          ${sortableHeader("run", "display_name")}
+          ${sortableHeader("status", "status")}
+          ${sortableHeader("started", "started_at")}
+          ${sortableHeader("duration", "duration_seconds")}
+          ${metricNames.map((m) => sortableHeader(m, `metric:${m}`)).join("")}
+          ${sortableHeader("hardware", "hardware")}
+          ${sortableHeader("warnings", "warning_count")}
         </tr></thead>
         <tbody>
-          ${runs.map((r) => `
+          ${sorted.map((r) => `
             <tr>
               ${project ? `<td><input type="checkbox" class="compare-check" value="${esc(r.run_id)}" /></td>` : ""}
               <td>
@@ -429,20 +635,34 @@ function renderRunsTable(runs, crumbHtml, project, currentStatusFilter) {
           `).join("")}
         </tbody>
       </table>
+      </div>
     </div>
   `;
+
+  document.querySelectorAll(".sortable-th").forEach((th) => th.addEventListener("click", () => {
+    const key = th.dataset.sortKey;
+    runsTableSort.dir = runsTableSort.key === key ? -runsTableSort.dir : 1;
+    runsTableSort.key = key;
+    renderRunsTable(runs, crumbHtml, project, currentStatusFilter);
+  }));
 
   if (project) {
     const checks = [...document.querySelectorAll(".compare-check")];
     const compareBtn = document.getElementById("compare-btn");
+    const overlayBtn = document.getElementById("overlay-btn");
     checks.forEach((c) => c.addEventListener("change", () => {
       const checked = checks.filter((x) => x.checked);
-      if (checked.length > 2) { c.checked = false; return; }
+      if (checked.length > MAX_OVERLAY_RUNS) { c.checked = false; return; }
       compareBtn.disabled = checked.length !== 2;
+      overlayBtn.disabled = checked.length < 2;
     }));
     compareBtn.addEventListener("click", () => {
       const [a, b] = checks.filter((c) => c.checked).map((c) => c.value);
       location.hash = `#/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`;
+    });
+    overlayBtn.addEventListener("click", () => {
+      const ids = checks.filter((c) => c.checked).map((c) => c.value);
+      location.hash = `#/overlay?ids=${ids.map(encodeURIComponent).join(",")}`;
     });
   }
 }
@@ -459,10 +679,34 @@ async function renderRunScreen(runId) {
     ]);
   } catch (e) { app.innerHTML = errorState(e); return; }
 
-  const metricRows = Object.entries(run.final_metrics || {})
-    .map(([k, v]) => `<div class="field"><span class="field-label">${esc(k)}</span><span class="field-value">${fmtNum(v)}</span></div>`)
-    .join("") || `<p class="ai-empty">no metrics logged</p>`;
+  renderRunScreenContent(runId, run, samples);
 
+  // Live polling: while the run is still active, re-fetch and re-render every
+  // few seconds so metric/telemetry charts actually update as training
+  // progresses, instead of only ever showing a static post-mortem snapshot.
+  // Capped at MAX_LIVE_POLLS so a run that's orphaned in "running" status
+  // forever (e.g. the Python process crashed without a clean finish) doesn't
+  // poll an open tab indefinitely.
+  const MAX_LIVE_POLLS = 200; // ~10 minutes at the 3s interval below
+  let pollCount = 0;
+  if (run.status === "running") {
+    activePollTimer = setInterval(async () => {
+      pollCount += 1;
+      if (pollCount > MAX_LIVE_POLLS) { stopActivePoll(); return; }
+      let freshRun, freshSamples;
+      try {
+        [freshRun, freshSamples] = await Promise.all([
+          api(`/runs/${encodeURIComponent(runId)}`),
+          api(`/runs/${encodeURIComponent(runId)}/samples`),
+        ]);
+      } catch (_) { return; }  // transient fetch failure -- just try again next tick
+      renderRunScreenContent(runId, freshRun, freshSamples);
+      if (freshRun.status !== "running") stopActivePoll();
+    }, 3000);
+  }
+}
+
+function renderRunScreenContent(runId, run, samples) {
   const configRows = Object.entries(run.config || {})
     .filter(([k]) => k !== "_simulated")
     .map(([k, v]) => `<div class="field"><span class="field-label">${esc(k)}</span><span class="field-value">${esc(v)}</span></div>`)
@@ -478,6 +722,8 @@ async function renderRunScreen(runId) {
         <ul class="warning-list">${run.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "";
 
   const timelineItems = buildTimeline(run);
+  const liveTag = run.status === "running"
+    ? `<span class="live-label" style="margin-left:8px;">&#9679; live, updating every 3s</span>` : "";
 
   app.innerHTML = `
     <p class="eyebrow"><a href="#/">projects</a> / <a href="#/project/${encodeURIComponent(run.project)}">${esc(run.project)}</a> / run</p>
@@ -491,14 +737,20 @@ async function renderRunScreen(runId) {
     <div class="action-bar">
       <button id="rename-btn">Rename</button>
       <a href="/api/runs/${encodeURIComponent(runId)}/export"><button>Export capsule</button></a>
+      <a href="/api/runs/${encodeURIComponent(runId)}/metrics.csv"><button>Export metrics (CSV)</button></a>
       <button id="resolve-btn">${run.resolved ? "Mark unresolved" : "Mark as resolved"}</button>
     </div>
 
     ${failureLink}
+
+    <div class="panel">
+      <h2 class="section-title">Metrics ${provenance("calculated")}${liveTag}</h2>
+      ${renderAllMetricCharts(run.metrics_over_time)}
+    </div>
+
     ${renderTrace(samples, "system telemetry")}
 
     <div class="panel-grid">
-      <div class="panel"><h2 class="section-title">Metrics ${provenance("calculated")}</h2>${metricRows}</div>
       <div class="panel"><h2 class="section-title">Config</h2>${configRows}</div>
       <div class="panel">
         <h2 class="section-title">Reproduction</h2>
@@ -525,6 +777,7 @@ async function renderRunScreen(runId) {
       body: JSON.stringify({ display_name: next || null }),
     });
     notify("Run name updated");
+    stopActivePoll();
     renderRunScreen(runId);
   });
   document.getElementById("resolve-btn").addEventListener("click", async () => {
@@ -535,6 +788,7 @@ async function renderRunScreen(runId) {
       body: JSON.stringify({ resolved: !run.resolved, resolved_note: note }),
     });
     notify(run.resolved ? "Run marked unresolved" : "Run marked resolved");
+    stopActivePoll();
     renderRunScreen(runId);
   });
 }
@@ -739,6 +993,88 @@ function diffRow(key, from, to) {
     <span class="diff-arrow">&rarr;</span><span class="diff-to">${esc(to)}</span></div>`;
 }
 
+// -------------------- screen: multi-run metric overlay --------------------
+
+const OVERLAY_COLORS = [
+  "var(--signal-mint)", "var(--signal-cyan)", "var(--signal-violet)", "var(--signal-amber)",
+  "#f472b6", "#fb923c",
+];
+
+async function renderOverlayScreen(params) {
+  const idsParam = params.get("ids") || "";
+  const ids = idsParam.split(",").filter(Boolean);
+  if (ids.length < 2) {
+    app.innerHTML = `<div class="empty-state"><p class="eyebrow">select at least two runs</p>
+      <p>Go to a project's run list, check 2 or more runs, then click "Overlay metrics."</p></div>`;
+    return;
+  }
+  app.innerHTML = `<p class="loading">loading runs to overlay&hellip;</p>`;
+  let runsData;
+  try {
+    runsData = await Promise.all(ids.map((id) => api(`/runs/${encodeURIComponent(id)}`)));
+  } catch (e) { app.innerHTML = errorState(e); return; }
+
+  const metricNames = [...new Set(runsData.flatMap((r) => Object.keys(r.metrics_over_time || {})))];
+
+  app.innerHTML = `
+    <p class="eyebrow">watcherml / overlay</p>
+    <h1 class="page-title">Compare metrics across ${runsData.length} runs ${provenance("calculated")}</h1>
+    <div class="overlay-legend">
+      ${runsData.map((r, i) => `<span><i style="background:${OVERLAY_COLORS[i % OVERLAY_COLORS.length]}"></i>
+        <a href="#/run/${encodeURIComponent(r.run_id)}">${esc(r.display_name)}</a></span>`).join("")}
+    </div>
+    <div class="panel">
+      ${metricNames.length
+        ? metricNames.map((name) => renderOverlayChart(name, runsData)).join("")
+        : `<p class="ai-empty">None of the selected runs have logged step-wise metrics.</p>`}
+    </div>
+  `;
+}
+
+function renderOverlayChart(metricName, runsData) {
+  const seriesList = runsData.map((r, i) => ({
+    color: OVERLAY_COLORS[i % OVERLAY_COLORS.length],
+    points: (r.metrics_over_time && r.metrics_over_time[metricName]) || [],
+  })).filter((s) => s.points.length > 0);
+
+  if (!seriesList.length) return `<div class="metric-chart-empty">${esc(metricName)}: no data in any selected run</div>`;
+
+  const allValues = seriesList.flatMap((s) => s.points.map((p) => p.value));
+  const allSteps = seriesList.flatMap((s) => s.points.map((p) => p.step ?? 0));
+  const minV = Math.min(...allValues), maxV = Math.max(...allValues);
+  const span = (maxV - minV) || Math.abs(maxV || 1) * 0.1 || 1;
+  const minX = Math.min(...allSteps), maxX = Math.max(...allSteps);
+  const xSpan = (maxX - minX) || 1;
+
+  const W = 640, H = 200, PAD_L = 50, PAD_R = 12, PAD_T = 12, PAD_B = 24;
+  const toXY = (step, value) => ({
+    x: PAD_L + ((step - minX) / xSpan) * (W - PAD_L - PAD_R),
+    y: H - PAD_B - ((value - minV) / span) * (H - PAD_T - PAD_B),
+  });
+
+  const yTicks = [0, 0.5, 1].map((f) => {
+    const val = minV + span * f;
+    const y = H - PAD_B - f * (H - PAD_T - PAD_B);
+    return `<line x1="${PAD_L}" x2="${W - PAD_R}" y1="${y}" y2="${y}" stroke="rgba(109,125,147,.16)" stroke-width="1"/>
+            <text x="${PAD_L - 8}" y="${y + 3}" text-anchor="end" font-size="9.5" fill="var(--ink-faint)" font-family="var(--font-mono)">${fmtNum(val, 3)}</text>`;
+  }).join("");
+
+  const lines = seriesList.map((s) => {
+    const sorted = [...s.points].sort((a, b) => (a.step ?? 0) - (b.step ?? 0));
+    const pts = sorted.map((p) => {
+      const c = toXY(p.step ?? 0, p.value);
+      return `${c.x.toFixed(1)},${c.y.toFixed(1)}`;
+    }).join(" ");
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join("");
+
+  return `<div class="metric-chart">
+    <div class="metric-chart-head"><span class="metric-chart-name">${esc(metricName)}</span></div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:${H}px; display:block;">${yTicks}${lines}</svg>
+    <div class="metric-chart-xaxis"><span>step ${minX}</span><span>step ${maxX}</span></div>
+  </div>`;
+}
+
 // -------------------- screen: global failures --------------------
 
 async function renderFailuresScreen() {
@@ -903,8 +1239,16 @@ async function renderCampaignScreen(campaignId) {
             <button class="ghost" data-copy="${esc(campaignId)}" data-copy-label="Campaign ID copied">Copy campaign ID</button>
           </div>
 
+          <aside class="campaign-agent-card" aria-label="Local Ollama reasoning">
+            <span class="agent-glyph" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2 2.55 6.45L21 11l-6.45 2.55L12 20l-2.55-6.45L3 11l6.45-2.55L12 2Z"/></svg></span>
+            <div><div class="agent-card-title">Ollama local</div><div class="agent-card-copy">Reasoning stays on this host</div></div>
+          </aside>
+        </section>
 
-        $
+        ${bestTrial ? `<aside class="verified-fix-toast" aria-label="Verified fix">
+          <div class="verified-icon" aria-hidden="true">↳</div>
+          <div><div class="verified-title">Verified fix</div><div class="verified-copy">${esc(formatPatch(bestTrial.patch))}</div></div>
+        </aside>` : ""}
 
         <section class="campaign-stat-strip" aria-label="Campaign summary">
           <div class="campaign-stat"><div class="campaign-stat-label">Best trial</div><div class="campaign-stat-value">${bestIndex >= 0 ? `#${String(bestIndex + 1).padStart(2, "0")}` : "—"}</div></div>

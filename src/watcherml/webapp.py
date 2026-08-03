@@ -12,7 +12,7 @@ import tempfile
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -211,6 +211,23 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
         export_capsule(storage, run_id, out_path=out_path)
         return FileResponse(out_path, filename=f"watcher-run-{run_id}.zip",
                              media_type="application/zip")
+
+    @app.get("/api/runs/{run_id}/metrics.csv")
+    def export_metrics_csv(run_id: str):
+        """Plain CSV of every logged metric point -- step, name, value,
+        timestamp -- for import into a spreadsheet or another tool. This is
+        the run's metrics only; use /export for the full reproduction capsule."""
+        if storage.get_run(run_id) is None:
+            raise HTTPException(404, f"Run '{run_id}' not found")
+        rows = storage.get_metrics(run_id)
+        lines = ["step,name,value,timestamp"]
+        for r in rows:
+            lines.append(f"{r['step']},{r['name']},{r['value']},{r['timestamp']}")
+        csv_text = "\n".join(lines)
+        return Response(
+            content=csv_text, media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{run_id}_metrics.csv"'},
+        )
 
     # -- failure capsule ------------------------------------------------
     @app.get("/api/failures")
