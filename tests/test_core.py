@@ -2,8 +2,7 @@
 
 Covers: run lifecycle, failure capsule diagnosis, structured diff, reproduction
 capsule export, the Ollama advisor client (against a fake local server -- no
-real Ollama install or network access required), and autopilot's deterministic
-fallback + hard iteration cap.
+real Ollama install or network access required)
 """
 import json
 import threading
@@ -144,49 +143,3 @@ def test_advisor_suggest_next_config_against_fake_server(fake_ollama):
     assert suggestion["config"]["batch_size"] == 16
 
 
-# --- autopilot -----------------------------------------------------------
-
-def test_autopilot_deterministic_fallback_halves_batch_size_until_success(storage):
-    from watcherml.autopilot import autopilot as run_autopilot
-
-    def flaky_train(config):
-        if config["batch_size"] >= 8:
-            raise RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")
-        return {"val_accuracy": 0.8}
-
-    result = run_autopilot(
-        project="t", train_fn=flaky_train,
-        base_config={"batch_size": 32}, goal_metric="val_accuracy",
-        max_iterations=6, storage=storage,
-    )
-    assert result.best_metric_value == 0.8
-    final_config = json.loads(storage.get_run(result.best_run_id)["config_json"])
-    assert final_config["batch_size"] < 32
-
-
-def test_autopilot_respects_hard_iteration_cap(storage, monkeypatch):
-    import importlib
-    # watcherml/__init__.py re-exports the `autopilot` *function* under the package's
-    # `autopilot` attribute, shadowing the submodule of the same name -- so
-    # `import watcherml.autopilot` would resolve to the function, not the module.
-    # importlib.import_module bypasses that and gets the real submodule.
-    autopilot_module = importlib.import_module("watcherml.autopilot")
-
-    call_count = {"n": 0}
-
-    def fake_suggest(*args, **kwargs):
-        call_count["n"] += 1
-        return {"config": {"lr": 1.0 / (call_count["n"] + 1)}, "rationale": "keep going"}
-
-    monkeypatch.setattr(autopilot_module.advisor, "is_available", lambda host=None: True)
-    monkeypatch.setattr(autopilot_module.advisor, "suggest_next_config", fake_suggest)
-
-    def always_succeeds(config):
-        return {"val_accuracy": 0.5}
-
-    result = autopilot_module.autopilot(
-        project="t", train_fn=always_succeeds,
-        base_config={"lr": 0.1}, goal_metric="val_accuracy",
-        max_iterations=9999, storage=storage,
-    )
-    assert len(result.run_ids) == autopilot_module.HARD_ITERATION_CAP

@@ -1,167 +1,525 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import importlib.util
 import json
+import os
+import platform
 import sys
+from pathlib import Path
+from typing import Any
 
-from . import advisor
-from .capsule import format_capsule_report
+from . import collectors
+from .capsule import (
+    build_evidence_index,
+    compare_to_last_success,
+    find_similar_failures,
+    format_capsule_report,
+)
 from .diff import compare_runs, format_diff_report
 from .export import export_capsule
 from .storage import Storage
 
 
-def _print_ai_section(title: str, text: str | None, model: str):
-    if text is None:
-        print(f"\n[{title}: unavailable -- Ollama isn't running, or model "
-              f"'{model}' isn't pulled. `ollama pull {model}` and retry. "
-              f"Everything above this line is deterministic and didn't need it.]")
+def _safe_json(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _row_get(row, key: str, default=None):
+    try:
+        return row[key] if key in row.keys() else default
+    except (AttributeError, KeyError, TypeError):
+        return default
+
+
+def _close_storage(storage: Storage) -> None:
+    close = getattr(storage, "close", None)
+    if callable(close):
+        close()
         return
-    print(f"\n--- {title} (AI-generated, model: {model} -- verify before trusting) ---")
+    connection = getattr(storage, "_conn", None)
+    if connection is not None:
+        connection.close()
+
+
+def _write_or_print(text: str, output: str | None = None) -> None:
+    if output:
+        path = Path(output).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        print(f"Written to {path}")
+        return
     print(text)
 
 
-def cmd_init(args):
-    Storage()  # creates .watcherml/ in the current directory
-    print("Initialized WatcherML in ./.watcherml (SQLite metadata + local artifact store).")
-    print("Next: `import watcherml as watcher` and wrap your training code with `watcher.init(...)`.")
+def _is_colab() -> bool:
+    return bool(
+        os.environ.get("COLAB_RELEASE_TAG")
+        or os.environ.get("COLAB_GPU")
+        or "google.colab" in sys.modules
+    )
 
 
-def cmd_runs(args):
-    storage = Storage()
-    rows = storage.list_runs(project=args.project)
-    if not rows:
-        print("No runs recorded yet.")
-        return
-    print(f"{'RUN_ID':<20} {'PROJECT':<20} {'STATUS':<10} {'DURATION':<10}")
-    for r in rows:
-        dur = f"{r['duration_seconds']:.1f}s" if r["duration_seconds"] else "-"
-        print(f"{r['run_id']:<20} {r['project']:<20} {r['exit_status'] or '-':<10} {dur:<10}")
+def _load_capsule(storage: Storage, run_id: str) -> dict | None:
+    """Load a complete v1 capsule when available, with legacy DB fallback."""
+    get_capsule = getattr(storage, "get_capsule", None)
+    if callable(get_capsule):
+        stored = get_capsule(run_id)
+        if stored is not None:
+            if isinstance(stored, dict):
+                return stored
+            capsule_json = _row_get(stored, "capsule_json")
+            if capsule_json:
+                return _safe_json(capsule_json, None)
 
-
-def cmd_inspect(args):
-    storage = Storage()
-    row = storage.get_run(args.run_id)
-    if row is None:
-        print(f"Run {args.run_id} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    failure = storage.get_failure(args.run_id)
-    if failure is not None:
-        capsule = {
-            "run_id": args.run_id,
-            "exception_type": failure["exception_type"],
-            "message": failure["message"],
-            "traceback": failure["traceback"],
-            "diagnosis": json.loads(failure["diagnosis_json"]),
-            "evidence": json.loads(failure["evidence_json"]),
-            "similar_previous_failures": [],
-            "comparison_to_last_success": None,
-        }
-        print(format_capsule_report(capsule))
-        if getattr(args, "advise", False):
-            _print_ai_section("AI explanation", advisor.explain_failure(capsule, model=args.model), args.model)
-        return
-
-    print(f"Run: {row['run_id']}  ({row['project']})")
-    print(f"Status: {row['exit_status']}")
-    if row["duration_seconds"]:
-        print(f"Duration: {row['duration_seconds']:.1f}s")
-    print(f"Config: {row['config_json']}")
-    print("Final metrics:")
-    for name, value in storage.final_metrics(args.run_id).items():
-        print(f"  {name}: {value}")
-    if row["reproduction_score"] is not None:
-        print(f"Reproduction score: {int(row['reproduction_score'])}/10")
-
-
-def cmd_failures(args):
-    storage = Storage()
-    rows = storage.list_failures(project=args.project)
-    if not rows:
-        print("No failures recorded. 🎉")
-        return
-    for r in rows:
-        diag = json.loads(r["diagnosis_json"])
-        print(f"{r['run_id']:<20} [{diag['rule']:<28}] {r['message'][:60]}")
-
-
-def cmd_compare(args):
-    storage = Storage()
-    diff = compare_runs(storage, args.run_a, args.run_b)
-    print(format_diff_report(diff))
-    if getattr(args, "advise", False):
-        _print_ai_section("Likely explanation", advisor.explain_diff(diff, model=args.model), args.model)
-
-
-def cmd_advise(args):
-    """Standalone advisor command: run it against any past failure or comparison."""
-    storage = Storage()
-    failure = storage.get_failure(args.run_id)
+    failure = storage.get_failure(run_id)
     if failure is None:
-        print(f"No failure recorded for {args.run_id}. `watcher advise` currently "
-              f"only explains failures -- use `watcher compare A B --advise` for comparisons.",
-              file=sys.stderr)
-        sys.exit(1)
-    capsule = {
-        "run_id": args.run_id,
+        return None
+
+    row = storage.get_run(run_id)
+    diagnosis = _safe_json(failure["diagnosis_json"], {})
+    evidence = _safe_json(failure["evidence_json"], {})
+    project = _row_get(row, "project") if row is not None else None
+    rule = diagnosis.get("rule", "unclassified")
+
+    similar = []
+    comparison = None
+    if project:
+        similar = find_similar_failures(storage, project, run_id, rule)
+        comparison = compare_to_last_success(storage, project, run_id)
+
+    return {
+        "schema_version": 0,
+        "run_id": run_id,
+        "project": project,
         "exception_type": failure["exception_type"],
         "message": failure["message"],
-        "diagnosis": json.loads(failure["diagnosis_json"]),
-        "evidence": json.loads(failure["evidence_json"]),
+        "traceback": failure["traceback"],
+        "diagnosis": diagnosis,
+        "evidence": evidence,
+        "evidence_index": build_evidence_index(evidence),
+        "similar_previous_failures": similar,
+        "comparison_to_last_success": comparison,
+        "provenance": {
+            "diagnosis": "rule-based",
+            "comparison": "calculated",
+        },
     }
-    if not advisor.is_available(host=args.host):
-        print(f"Ollama isn't reachable at {args.host}. Start it (`ollama serve`) "
-              f"and make sure the model is pulled (`ollama pull {args.model}`).")
-        sys.exit(1)
-    text = advisor.explain_failure(capsule, model=args.model, host=args.host)
-    _print_ai_section("AI explanation", text, args.model)
 
 
-def cmd_export(args):
+def _format_capsule_markdown(capsule: dict) -> str:
+    diagnosis = capsule.get("diagnosis") or capsule.get("classification") or {}
+    evidence = capsule.get("evidence") or {}
+    comparison = (
+        capsule.get("comparison_to_last_success")
+        or capsule.get("nearest_successful_run")
+    )
+
+    lines = [
+        f"# WatcherML failure capsule: `{capsule.get('run_id', 'unknown')}`",
+        "",
+        f"- **Project:** {capsule.get('project') or 'unknown'}",
+        f"- **Failure:** `{diagnosis.get('rule', 'unclassified')}`",
+        f"- **Exception:** `{capsule.get('exception_type', 'unknown')}`",
+        f"- **Message:** {capsule.get('message') or 'No message captured'}",
+        f"- **Schema version:** {capsule.get('schema_version', 0)}",
+        "",
+        "## Deterministic diagnosis",
+        "",
+        diagnosis.get("summary") or "No deterministic summary available.",
+    ]
+
+    if diagnosis.get("likely_cause"):
+        lines.extend(["", f"**Likely cause:** {diagnosis['likely_cause']}"])
+
+    actions = diagnosis.get("suggested_actions") or []
+    if actions:
+        lines.extend(["", "## Suggested interventions", ""])
+        lines.extend(f"- {action}" for action in actions)
+
+    if comparison:
+        lines.extend([
+            "",
+            "## Nearest successful run",
+            "",
+            f"- **Run:** `{comparison.get('run_id')}`",
+            f"- **Similarity:** {comparison.get('similarity_score', 'unknown')}",
+        ])
+
+    recent_metrics = evidence.get("recent_metrics") or []
+    if recent_metrics:
+        lines.extend(["", "## Recent metrics", ""])
+        for metric in recent_metrics:
+            lines.append(
+                f"- `{metric.get('name')}` = {metric.get('value')} "
+                f"(step {metric.get('step')})"
+            )
+
+    evidence_index = capsule.get("evidence_index") or []
+    if evidence_index:
+        lines.extend(["", "## Evidence index", ""])
+        lines.extend(
+            f"- **{item.get('id')}** — {item.get('label', item.get('category'))}"
+            for item in evidence_index
+        )
+
+    lines.extend([
+        "",
+        "## Traceback",
+        "",
+        "```text",
+        capsule.get("traceback") or "No traceback captured.",
+        "```",
+    ])
+    return "\n".join(lines)
+
+
+def _render_capsule(capsule: dict, output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(capsule, indent=2, ensure_ascii=False)
+    if output_format == "markdown":
+        return _format_capsule_markdown(capsule)
+    return format_capsule_report(capsule)
+
+
+def cmd_init(args) -> None:
     storage = Storage()
-    out_path = export_capsule(storage, args.run_id, args.out)
-    print(f"Reproduction capsule written to {out_path}")
+    try:
+        print(f"Initialized WatcherML in {storage.root}")
+        print(
+            "Next: `import watcherml as watcher` and wrap your training code "
+            "with `watcher.init(...)`."
+        )
+    finally:
+        _close_storage(storage)
 
 
-def cmd_recoveries(args):
+def cmd_runs(args) -> None:
     storage = Storage()
-    rows = storage.list_recovery_campaigns(project=args.project)
-    if not rows:
-        print("No recovery campaigns recorded yet. Launch one from Python: "
-              "watcher.recover_from_oom(project=..., failed_run_id=..., train_fn=...)")
-        return
-    print(f"{'CAMPAIGN_ID':<20} {'PROJECT':<20} {'STOPPED_REASON':<38} {'BEST_RUN':<24}")
-    for r in rows:
-        reason = (r["stopped_reason"] or "running")[:36]
-        print(f"{r['campaign_id']:<20} {r['project']:<20} {reason:<38} {r['best_run_id'] or '-':<24}")
+    try:
+        rows = storage.list_runs(project=args.project)
+        if args.format == "json":
+            payload = []
+            for row in rows:
+                item = dict(row)
+                item["final_metrics"] = storage.final_metrics(row["run_id"])
+                payload.append(item)
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
+        if not rows:
+            print("No runs recorded yet.")
+            return
+
+        print(f"{'RUN_ID':<26} {'PROJECT':<20} {'STATUS':<12} {'DURATION':<10}")
+        for row in rows:
+            duration = row["duration_seconds"]
+            duration_text = f"{duration:.1f}s" if duration is not None else "-"
+            print(
+                f"{row['run_id']:<26} {row['project']:<20} "
+                f"{row['exit_status'] or '-':<12} {duration_text:<10}"
+            )
+    finally:
+        _close_storage(storage)
 
 
-def cmd_recovery(args):
+def cmd_inspect(args) -> None:
     storage = Storage()
-    campaign = storage.get_recovery_campaign(args.campaign_id)
-    if campaign is None:
-        print(f"Campaign {args.campaign_id} not found.", file=sys.stderr)
-        sys.exit(1)
-    print(f"Campaign: {campaign['campaign_id']}  ({campaign['project']})")
-    print(f"Source run (the OOM failure this campaign recovers from): {campaign['source_run_id']}")
-    print(f"Stopped: {campaign['stopped_reason'] or 'still running'}")
-    if campaign["best_run_id"]:
-        print(f"Best verified run: {campaign['best_run_id']}")
-    print("\nTrials:")
-    for t in storage.list_recovery_trials(args.campaign_id):
-        patch = json.loads(t["patch_json"] or "{}")
-        print(f"  [{t['phase']:<5}] {t['run_id']:<24} outcome={t['outcome']:<20} "
-              f"score={t['score']}  patch={patch}")
+    try:
+        row = storage.get_run(args.run_id)
+        if row is None:
+            raise ValueError(f"Run '{args.run_id}' not found.")
+
+        capsule = _load_capsule(storage, args.run_id)
+        if capsule is not None:
+            _write_or_print(_render_capsule(capsule, args.format), args.output)
+            return
+
+        config = _safe_json(row["config_json"], {})
+        final_metrics = storage.final_metrics(args.run_id)
+        if args.format == "json":
+            payload = dict(row)
+            payload["config"] = config
+            payload["final_metrics"] = final_metrics
+            _write_or_print(
+                json.dumps(payload, indent=2, ensure_ascii=False), args.output
+            )
+            return
+
+        if args.format == "markdown":
+            lines = [
+                f"# WatcherML run: `{row['run_id']}`",
+                "",
+                f"- **Project:** {row['project']}",
+                f"- **Status:** {row['exit_status']}",
+                f"- **Duration:** {row['duration_seconds'] or 0:.1f}s",
+                "",
+                "## Config",
+                "",
+                "```json",
+                json.dumps(config, indent=2, ensure_ascii=False),
+                "```",
+                "",
+                "## Final metrics",
+                "",
+            ]
+            lines.extend(f"- `{name}`: {value}" for name, value in final_metrics.items())
+            _write_or_print("\n".join(lines), args.output)
+            return
+
+        print(f"Run: {row['run_id']}  ({row['project']})")
+        print(f"Status: {row['exit_status']}")
+        if row["duration_seconds"] is not None:
+            print(f"Duration: {row['duration_seconds']:.1f}s")
+        print(f"Config: {json.dumps(config, ensure_ascii=False)}")
+        print("Final metrics:")
+        if final_metrics:
+            for name, value in final_metrics.items():
+                print(f"  {name}: {value}")
+        else:
+            print("  none")
+
+        completeness = _row_get(row, "capture_completeness")
+        if completeness is None:
+            completeness = _row_get(row, "reproduction_score")
+        if completeness is not None:
+            print(f"Capture completeness: {int(completeness)}/10")
+    finally:
+        _close_storage(storage)
 
 
-def cmd_ui(args):
+def cmd_capsule(args) -> None:
+    storage = Storage()
+    try:
+        capsule = _load_capsule(storage, args.run_id)
+        if capsule is None:
+            raise ValueError(f"No failure capsule found for run '{args.run_id}'.")
+        _write_or_print(_render_capsule(capsule, args.format), args.output)
+    finally:
+        _close_storage(storage)
+
+
+def cmd_failures(args) -> None:
+    storage = Storage()
+    try:
+        rows = storage.list_failures(project=args.project)
+        if args.format == "json":
+            payload = []
+            for row in rows:
+                item = dict(row)
+                item["diagnosis"] = _safe_json(row["diagnosis_json"], {})
+                payload.append(item)
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
+        if not rows:
+            print("No failures recorded.")
+            return
+
+        print(f"{'RUN_ID':<26} {'FAILURE':<30} MESSAGE")
+        for row in rows:
+            diagnosis = _safe_json(row["diagnosis_json"], {})
+            rule = diagnosis.get("rule", "unclassified")
+            message = (row["message"] or "")[:70]
+            print(f"{row['run_id']:<26} {rule:<30} {message}")
+    finally:
+        _close_storage(storage)
+
+
+def cmd_compare(args) -> None:
+    storage = Storage()
+    try:
+        diff = compare_runs(storage, args.run_a, args.run_b)
+        if args.format == "json":
+            _write_or_print(
+                json.dumps(diff, indent=2, ensure_ascii=False), args.output
+            )
+        else:
+            _write_or_print(format_diff_report(diff), args.output)
+    finally:
+        _close_storage(storage)
+
+
+def cmd_export(args) -> None:
+    storage = Storage()
+    try:
+        out_path = export_capsule(storage, args.run_id, args.out)
+        print(f"Evidence capsule written to {out_path}")
+    finally:
+        _close_storage(storage)
+
+
+def cmd_recover_list(args) -> None:
+    storage = Storage()
+    try:
+        rows = storage.list_recovery_campaigns(project=args.project)
+        if args.format == "json":
+            print(json.dumps([dict(row) for row in rows], indent=2, ensure_ascii=False))
+            return
+
+        if not rows:
+            print("No OOM recovery campaigns recorded yet.")
+            return
+
+        print(f"{'CAMPAIGN_ID':<22} {'PROJECT':<20} {'STATUS':<38} {'SELECTED_RUN':<26}")
+        for row in rows:
+            status = (row["stopped_reason"] or "running")[:36]
+            print(
+                f"{row['campaign_id']:<22} {row['project']:<20} "
+                f"{status:<38} {row['best_run_id'] or '-':<26}"
+            )
+    finally:
+        _close_storage(storage)
+
+
+def cmd_recover_show(args) -> None:
+    storage = Storage()
+    try:
+        campaign = storage.get_recovery_campaign(args.campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign '{args.campaign_id}' not found.")
+
+        trials = storage.list_recovery_trials(args.campaign_id)
+        if args.format == "json":
+            payload = dict(campaign)
+            payload["trials"] = [dict(trial) for trial in trials]
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
+        print(f"Campaign: {campaign['campaign_id']}  ({campaign['project']})")
+        print(f"Source OOM run: {campaign['source_run_id']}")
+        print(f"Status: {campaign['stopped_reason'] or 'running'}")
+        if campaign["best_run_id"]:
+            print(f"Selected full trial: {campaign['best_run_id']}")
+        print("\nTrials:")
+        if not trials:
+            print("  none")
+            return
+        for trial in trials:
+            patch = _safe_json(trial["patch_json"], {})
+            print(
+                f"  [{trial['phase']:<8}] {trial['run_id']:<26} "
+                f"outcome={trial['outcome']:<22} patch={patch}"
+            )
+    finally:
+        _close_storage(storage)
+
+
+def cmd_doctor(args) -> None:
+    storage = Storage()
+    try:
+        connection = getattr(storage, "_conn", None)
+        journal_mode = "unknown"
+        if connection is not None:
+            try:
+                journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            except Exception:
+                journal_mode = "unavailable"
+
+        try:
+            package_version = importlib.metadata.version("watcherml")
+        except importlib.metadata.PackageNotFoundError:
+            package_version = "development checkout"
+
+        torch_report: dict[str, Any]
+        try:
+            import torch
+
+            torch_report = {
+                "available": True,
+                "version": torch.__version__,
+                "cuda_available": torch.cuda.is_available(),
+                "cuda_build": torch.version.cuda,
+                "device": (
+                    torch.cuda.get_device_name(torch.cuda.current_device())
+                    if torch.cuda.is_available()
+                    else None
+                ),
+            }
+        except ImportError:
+            torch_report = {
+                "available": False,
+                "version": None,
+                "cuda_available": False,
+                "cuda_build": None,
+                "device": None,
+            }
+
+        try:
+            isolated_runner = importlib.util.find_spec(
+                "watcherml.recovery.executor"
+            ) is not None
+        except (ImportError, ModuleNotFoundError):
+            isolated_runner = False
+
+        gpu = collectors.collect_gpu_info()
+        report = {
+            "watcherml_version": package_version,
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "environment": "google_colab" if _is_colab() else "local",
+            "storage_root": str(storage.root),
+            "database_path": str(storage.db_path),
+            "database_exists": Path(storage.db_path).exists(),
+            "sqlite_journal_mode": journal_mode,
+            "pytorch": torch_report,
+            "gpu": gpu,
+            "isolated_trial_runner": isolated_runner,
+            "ui_dependencies": importlib.util.find_spec("uvicorn") is not None,
+        }
+
+        if args.format == "json":
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return
+
+        rows = [
+            ("WatcherML", report["watcherml_version"]),
+            ("Python", report["python_version"]),
+            ("Environment", report["environment"]),
+            ("Storage", report["storage_root"]),
+            ("Database", "healthy" if report["database_exists"] else "missing"),
+            ("SQLite journal", report["sqlite_journal_mode"]),
+            ("PyTorch", torch_report["version"] or "not installed"),
+            ("CUDA available", "yes" if torch_report["cuda_available"] else "no"),
+            ("CUDA build", torch_report["cuda_build"] or "unknown"),
+            ("GPU", torch_report["device"] or "not detected"),
+            ("Isolated trials", "ready" if isolated_runner else "not implemented"),
+            ("Local UI", "available" if report["ui_dependencies"] else "not installed"),
+        ]
+        width = max(len(label) for label, _ in rows)
+        for label, value in rows:
+            print(f"{label:<{width}}  {value}")
+
+        if _is_colab():
+            print(
+                "\nColab mode: use CLI/JSON/Markdown reports. To preserve run history, "
+                "set WATCHERML_HOME to a mounted Google Drive directory."
+            )
+    finally:
+        _close_storage(storage)
+
+
+def cmd_ui(args) -> None:
+    if _is_colab():
+        raise ValueError(
+            "The local web UI is not supported in Google Colab. Use `watcherml runs`, "
+            "`watcherml inspect`, and `watcherml capsule --format markdown` instead."
+        )
+
     try:
         import uvicorn
     except ImportError:
-        print("The web UI needs extra dependencies. Install them with:\n"
-              "  pip install watcherml[ui]", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(
+            "The web UI needs optional dependencies. Install them with "
+            "`pip install watcherml[ui]`."
+        ) from None
+
     from .webapp import create_app
 
     app = create_app(Storage())
@@ -170,74 +528,107 @@ def cmd_ui(args):
     if not args.no_browser:
         import threading
         import webbrowser
+
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
-def build_parser():
-    p = argparse.ArgumentParser(prog="watcher", description="WatcherML CLI")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    sp = sub.add_parser("init", help="Initialize WatcherML in the current directory")
-    sp.set_defaults(func=cmd_init)
-
-    sp = sub.add_parser("runs", help="List recorded runs")
-    sp.add_argument("--project", default=None)
-    sp.set_defaults(func=cmd_runs)
-
-    sp = sub.add_parser("inspect", help="Show details for a single run")
-    sp.add_argument("run_id")
-    sp.add_argument("--advise", action="store_true",
-                     help="Add an AI-generated explanation via Ollama (optional; deterministic capsule works without it)")
-    sp.add_argument("--model", default=advisor.DEFAULT_MODEL)
-    sp.set_defaults(func=cmd_inspect)
-
-    sp = sub.add_parser("failures", help="List all recorded failures")
-    sp.add_argument("--project", default=None)
-    sp.set_defaults(func=cmd_failures)
-
-    sp = sub.add_parser("compare", help="Compare two runs")
-    sp.add_argument("run_a")
-    sp.add_argument("run_b")
-    sp.add_argument("--advise", action="store_true",
-                     help="Add an AI-generated 'likely explanation' via Ollama")
-    sp.add_argument("--model", default=advisor.DEFAULT_MODEL)
-    sp.set_defaults(func=cmd_compare)
-
-    sp = sub.add_parser("advise", help="Get an AI (Ollama) explanation for a past failure")
-    sp.add_argument("run_id")
-    sp.add_argument("--model", default=advisor.DEFAULT_MODEL)
-    sp.add_argument("--host", default=advisor.DEFAULT_HOST)
-    sp.set_defaults(func=cmd_advise)
-
-    sp = sub.add_parser("export", help="Export a portable reproduction capsule")
-    sp.add_argument("run_id")
-    sp.add_argument("--format", default="capsule", choices=["capsule"])
-    sp.add_argument("--out", default=None)
-    sp.set_defaults(func=cmd_export)
-
-    sp = sub.add_parser("recoveries", help="List OOM recovery campaigns")
-    sp.add_argument("--project", default=None)
-    sp.set_defaults(func=cmd_recoveries)
-
-    sp = sub.add_parser("recovery", help="Show detail for one recovery campaign")
-    sp.add_argument("campaign_id")
-    sp.set_defaults(func=cmd_recovery)
-
-    sp = sub.add_parser("ui", help="Launch the local web UI")
-    sp.add_argument("--host", default="127.0.0.1")
-    sp.add_argument("--port", type=int, default=7331)
-    sp.add_argument("--no-browser", action="store_true", help="Don't auto-open a browser tab")
-    sp.set_defaults(func=cmd_ui)
-
-    return p
+def _add_format_argument(parser, choices=("table", "json")) -> None:
+    parser.add_argument(
+        "--format",
+        choices=choices,
+        default=choices[0],
+        help=f"Output format (default: {choices[0]})",
+    )
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="watcherml",
+        description="Your open-source reliability and recovery layer for ML training runs.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    command = sub.add_parser("init", help="Initialize WatcherML in the current directory")
+    command.set_defaults(func=cmd_init)
+
+    command = sub.add_parser("runs", help="List recorded runs")
+    command.add_argument("--project")
+    _add_format_argument(command)
+    command.set_defaults(func=cmd_runs)
+
+    command = sub.add_parser("inspect", help="Inspect a run or its failure capsule")
+    command.add_argument("run_id")
+    command.add_argument("--output", help="Write the report to a file")
+    _add_format_argument(command, ("table", "json", "markdown"))
+    command.set_defaults(func=cmd_inspect)
+
+    command = sub.add_parser(
+        "capsule", help="Show or export a deterministic failure capsule"
+    )
+    command.add_argument("run_id")
+    command.add_argument("--output", help="Write the capsule report to a file")
+    _add_format_argument(command, ("table", "json", "markdown"))
+    command.set_defaults(func=cmd_capsule)
+
+    command = sub.add_parser("failures", help="List recorded failures")
+    command.add_argument("--project")
+    _add_format_argument(command)
+    command.set_defaults(func=cmd_failures)
+
+    command = sub.add_parser("compare", help="Compare two recorded runs")
+    command.add_argument("run_a")
+    command.add_argument("run_b")
+    command.add_argument("--output", help="Write the comparison to a file")
+    _add_format_argument(command)
+    command.set_defaults(func=cmd_compare)
+
+    command = sub.add_parser("export", help="Export a portable evidence capsule")
+    command.add_argument("run_id")
+    command.add_argument("--out", help="Destination ZIP path")
+    command.set_defaults(func=cmd_export)
+
+    recover = sub.add_parser("recover", help="Inspect bounded OOM recovery campaigns")
+    recover_sub = recover.add_subparsers(dest="recover_command", required=True)
+
+    command = recover_sub.add_parser("list", help="List OOM recovery campaigns")
+    command.add_argument("--project")
+    _add_format_argument(command)
+    command.set_defaults(func=cmd_recover_list)
+
+    command = recover_sub.add_parser("show", help="Show an OOM recovery campaign")
+    command.add_argument("campaign_id")
+    _add_format_argument(command)
+    command.set_defaults(func=cmd_recover_show)
+
+    command = sub.add_parser(
+        "doctor", help="Check storage, PyTorch, CUDA, Colab, UI, and trial support"
+    )
+    _add_format_argument(command)
+    command.set_defaults(func=cmd_doctor)
+
+    command = sub.add_parser("ui", help="Launch the optional local web UI")
+    command.add_argument("--host", default="127.0.0.1")
+    command.add_argument("--port", type=int, default=7331)
+    command.add_argument("--no-browser", action="store_true")
+    command.set_defaults(func=cmd_ui)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
-    args.func(args)
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+    except ValueError as exc:
+        print(f"watcherml: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

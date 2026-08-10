@@ -12,12 +12,19 @@ import sqlite3
 import threading
 from typing import Optional
 
-DEFAULT_DIR = os.path.join(os.getcwd(), ".watcherml")
+from pathlib import Path
+
+
+def default_storage_root() -> Path:
+    configured = os.getenv("WATCHERML_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path.cwd() / ".watcherml"
 
 
 class Storage:
-    def __init__(self, root: str = DEFAULT_DIR):
-        self.root = root
+    def __init__(self, root=None):
+        self.root = Path(root) if root else default_storage_root()
         os.makedirs(self.root, exist_ok=True)
         os.makedirs(os.path.join(self.root, "artifacts"), exist_ok=True)
         self.db_path = os.path.join(self.root, "watcher.db")

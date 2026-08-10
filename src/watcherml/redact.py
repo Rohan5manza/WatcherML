@@ -33,3 +33,42 @@ def redact(text: str) -> str:
     for pattern in _DEFAULT_PATTERNS + _custom_patterns:
         text = pattern.sub("[REDACTED]", text)
     return text
+
+_SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "token",
+    "access_token",
+    "refresh_token",
+    "password",
+    "passwd",
+    "secret",
+    "authorization",
+    "cookie",
+}
+
+
+def redact_value(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in _SECRET_KEYS or any(
+                word in normalized
+                for word in ("password", "secret", "token", "api_key")
+            ):
+                result[key] = "[REDACTED]"
+            else:
+                result[key] = redact_value(item)
+        return result
+
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [redact_value(item) for item in value]
+
+    if isinstance(value, str):
+        return redact(value)
+
+    return value

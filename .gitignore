@@ -1,8 +1,31 @@
+# WatcherML
 .watcherml/
-examples/*.zip
+
+# Python
 __pycache__/
+*.py[cod]
 *.egg-info/
 .pytest_cache/
+.coverage
+htmlcov/
 build/
 dist/
-.watcherml/
+
+# Virtual environments
+.venv/
+venv/
+
+# Editors and operating systems
+.DS_Store
+.vscode/
+.idea/
+
+# Local datasets and generated capsules
+data/
+datasets/
+watcher-run-*.zip
+
+# Secrets
+.env
+.env.*
+!.env.example

@@ -12,8 +12,8 @@ suggested.
 
 Role separation (this is deliberate, not incidental):
   - Observer       (`observe`)                  -- facts only, no LLM
-  - Diagnostician  (`advisor.rank_memory_hypotheses`) -- Ollama, ranks causes
-  - Planner        (`advisor.propose_recovery_patches`) -- Ollama, proposes patches
+  - Diagnostician  (`_get_llm_hypotheses`)      -- LiteLLM, ranks causes
+  - Planner        (`_get_llm_patches`)         -- LiteLLM, proposes patches
   - Policy engine  (`validate_patch`)            -- deterministic, the only
                                                      thing standing between an
                                                      LLM's opinion and anything
@@ -27,7 +27,7 @@ Role separation (this is deliberate, not incidental):
                                                      independently inspectable
 
 Both LLM roles have deterministic fallbacks. The agent still runs end to end
-with no Ollama installed -- it just proposes more generic candidates.
+with no LLM configured -- it just proposes more generic candidates.
 
 Safety notes, deliberately narrow for this MVP:
   - The policy engine allow-lists exactly six keys (see ALLOWED_KEYS) and
@@ -47,13 +47,15 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from typing import Callable, Optional
 
-from . import advisor
+import litellm  # <-- NEW: unified LLM interface
+
 from .capsule import compare_to_last_success
 from .run import Run
 from .storage import Storage
@@ -177,7 +179,7 @@ def observe(storage: Storage, run_id: str) -> dict:
 
 # ============================================================================
 # Deterministic fallbacks for the Diagnostician and Planner roles, used when
-# Ollama is unavailable or returns nothing usable. The agent must still work.
+# LiteLLM is unavailable or returns nothing usable. The agent must still work.
 # ============================================================================
 
 def _fallback_hypotheses(observation: dict) -> list:
@@ -185,7 +187,7 @@ def _fallback_hypotheses(observation: dict) -> list:
         "cause": "activation_memory_or_batch_size",
         "explanation": (
             "Generic OOM pattern: batch size and/or activation memory likely "
-            "exceeded available VRAM (deterministic fallback -- Ollama unavailable)."
+            "exceeded available VRAM (deterministic fallback -- LiteLLM unavailable)."
         ),
         "confidence": 0.5,
     }]
@@ -216,6 +218,126 @@ def _fallback_candidates(base_config: dict) -> list:
             "confidence": None,
         })
     return candidates
+
+
+# ============================================================================
+# NEW: LiteLLM-based Diagnostician & Planner
+# ============================================================================
+
+def _llm_query(
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    api_base: Optional[str] = None,
+    temperature: float = 0.3,
+    max_tokens: int = 800,
+) -> Optional[str]:
+    """Send a prompt to LiteLLM and return the raw text response.
+    Returns None if anything fails."""
+    try:
+        # LiteLLM uses standard OpenAI-compatible env vars by default:
+        # OPENAI_API_KEY, OPENAI_API_BASE, etc.
+        # Pass api_base explicitly if provided.
+        kwargs = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if api_base:
+            kwargs["api_base"] = api_base
+
+        response = litellm.completion(**kwargs)
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[WatcherML] LiteLLM query failed: {e}")
+        return None
+
+
+def _get_llm_hypotheses(
+    observation: dict,
+    model: str,
+    api_base: Optional[str] = None,
+) -> Optional[list]:
+    """Ask LiteLLM to rank possible causes of the OOM failure.
+    Expects a JSON array: [{"cause": "...", "explanation": "...", "confidence": 0.0}]."""
+    system = (
+        "You are an expert ML debugging assistant. Your output must be **valid JSON only**."
+        " No markdown, no prose outside the JSON. "
+        "Return a JSON array of objects, each with keys: 'cause' (string), "
+        "'explanation' (string), and 'confidence' (float between 0 and 1)."
+    )
+    user = (
+        f"Failure: CUDA OOM. Trace: {observation.get('failure_step') or 'No step info'}.\n"
+        f"GPU: {observation.get('gpu', {})}\n"
+        f"Config at failure: {observation.get('config', {})}\n"
+        f"Peak VRAM: {observation.get('peak_vram_gb')} GB\n"
+        f"Nearest successful run config (if any): {observation.get('nearest_successful_config', 'None')}\n"
+        "List the top 3 likely causes with confidence scores."
+    )
+    raw = _llm_query(system, user, model, api_base)
+    if not raw:
+        return None
+    try:
+        # Strip markdown fences if present
+        raw = raw.strip()
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        if raw.startswith("```"):
+            raw = raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        data = json.loads(raw.strip())
+        if isinstance(data, list):
+            return data
+        return None
+    except json.JSONDecodeError:
+        return None
+
+
+def _get_llm_patches(
+    observation: dict,
+    hypotheses: list,
+    base_config: dict,
+    model: str,
+    api_base: Optional[str] = None,
+) -> Optional[list]:
+    """Ask LiteLLM to propose config patches based on the top hypotheses.
+    Expects a JSON array: [{"patch": {"batch_size": 16}, "rationale": "...", "confidence": 0.0}]."""
+    system = (
+        "You are an expert ML debugging assistant. Your output must be **valid JSON only**."
+        " No markdown, no prose outside the JSON. "
+        "Return a JSON array of objects, each with keys: 'patch' (object with key:value pairs), "
+        "'rationale' (string), and 'confidence' (float between 0 and 1). "
+        f"You may only propose changes to these keys: {list(ALLOWED_KEYS)}."
+    )
+    user = (
+        f"Failure: CUDA OOM. Config: {base_config}\n"
+        f"Hypotheses: {hypotheses}\n"
+        "Propose up to 3 distinct config patches that could fix the OOM. "
+        "Prioritize safe, conservative changes. If a hypothesis suggests changing a key "
+        "not in the allowed list, propose an alternative allowed key that would have a similar effect."
+    )
+    raw = _llm_query(system, user, model, api_base)
+    if not raw:
+        return None
+    try:
+        raw = raw.strip()
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        if raw.startswith("```"):
+            raw = raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        data = json.loads(raw.strip())
+        if isinstance(data, list):
+            return data
+        return None
+    except json.JSONDecodeError:
+        return None
 
 
 # ============================================================================
@@ -290,8 +412,8 @@ def recover_from_oom(
     failed_run_id: str,
     train_fn: Callable,
     contract: Optional[RecoveryContract] = None,
-    model: str = advisor.DEFAULT_MODEL,
-    host: str = advisor.DEFAULT_HOST,
+    model: Optional[str] = None,
+    api_base: Optional[str] = None,
     storage: Optional[Storage] = None,
 ) -> dict:
     """Run one OOM recovery campaign against a specific failed run.
@@ -300,16 +422,31 @@ def recover_from_oom(
     For cheap probing, also accept train_fn(config, max_steps=N) -- if your
     signature doesn't take max_steps, probing silently falls back to full
     trials (still safe, just not cheap).
+
+    Args:
+        model: LiteLLM model string (e.g. "openai/gpt-4o-mini", "ollama/llama3",
+               "groq/llama-3.1-70b-versatile", "claude-3-haiku-20240307").
+               Defaults to env var WATCHER_LLM_MODEL or "openai/gpt-4o-mini".
+        api_base: Optional custom API endpoint. If not set, LiteLLM uses
+                  the default for the provider (e.g. OPENAI_API_BASE env var).
     """
     storage = storage or Storage()
     contract = contract or RecoveryContract()
+
+    # Determine model and API base from env or defaults
+    if model is None:
+        model = os.getenv("WATCHER_LLM_MODEL", "openai/gpt-4o-mini")
+    if api_base is None:
+        api_base = os.getenv("OPENAI_API_BASE") or os.getenv("WATCHER_LLM_API_BASE")
+
     campaign_id = f"recovery-{uuid.uuid4().hex[:8]}"
     started_at = time.time()
     storage.create_recovery_campaign(campaign_id, project, failed_run_id, asdict(contract), started_at)
     trial_budget = min(contract.max_trials, HARD_TRIAL_CAP)
 
     print(f"WatcherML OOM recovery agent: campaign {campaign_id} "
-          f"(budget: {trial_budget} trials, {contract.probe_steps}-step probes)\n")
+          f"(budget: {trial_budget} trials, {contract.probe_steps}-step probes)")
+    print(f"LLM backend: {model}" + (f" (base: {api_base})" if api_base else "") + "\n")
 
     # -- 1. Observer ------------------------------------------------------
     observation = observe(storage, failed_run_id)
@@ -318,20 +455,21 @@ def recover_from_oom(
               f"'{observation['failure_class']}', not cuda_out_of_memory. This agent "
               "is scoped to OOM recovery only -- proceeding, but hypotheses may not fit.\n")
 
-    # -- 2. Diagnostician ---------------------------------------------------
-    hypotheses = advisor.rank_memory_hypotheses(observation, model=model, host=host)
+    # -- 2. Diagnostician (LiteLLM) ------------------------------------------
+    hypotheses = _get_llm_hypotheses(observation, model, api_base)
     used_llm_diagnosis = hypotheses is not None
     if not hypotheses:
         hypotheses = _fallback_hypotheses(observation)
-    print(f"Hypotheses ({'Ollama' if used_llm_diagnosis else 'deterministic fallback'}):")
+        print(f"Hypotheses (deterministic fallback — LiteLLM unavailable):")
+    else:
+        print(f"Hypotheses (LiteLLM — {model}):")
     for h in hypotheses:
         print(f"  - {h.get('cause')} (confidence {h.get('confidence')}): {h.get('explanation', '')}")
 
-    # -- 3. Planner + policy engine ---------------------------------------
+    # -- 3. Planner + policy engine (LiteLLM) ------------------------------
     base_config = observation["config"]
-    raw_candidates = advisor.propose_recovery_patches(observation, hypotheses, base_config,
-                                                       model=model, host=host)
-    used_llm_planner = bool(raw_candidates)
+    raw_candidates = _get_llm_patches(observation, hypotheses, base_config, model, api_base)
+    used_llm_planner = raw_candidates is not None
     candidates = []
     rejected_count = 0
     for raw in (raw_candidates or []):
@@ -349,7 +487,7 @@ def recover_from_oom(
                                     "confidence": raw["confidence"], "hypotheses": hypotheses})
     candidates = candidates[:contract.max_candidates]
 
-    print(f"\nCandidates ({'Ollama, policy-validated' if used_llm_planner else 'deterministic fallback'}, "
+    print(f"\nCandidates ({'LiteLLM, policy-validated' if used_llm_planner else 'deterministic fallback'}, "
           f"{rejected_count} proposed key(s) rejected by policy engine):")
     for c in candidates:
         print(f"  - {c['patch']}  -- {c['rationale']}")

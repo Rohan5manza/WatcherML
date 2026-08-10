@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import advisor, collectors
+from . import collectors
 from .capsule import build_evidence_index, compare_to_last_success, find_similar_failures
 from .diff import compare_runs
 from .export import export_capsule
@@ -119,7 +119,7 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
             ],
             "gpu_available": gpu_info.get("available", False),
             "gpu_name": _gpu_name(json.dumps(gpu_info)),
-            "ollama_available": advisor.is_available(),
+            
         }
 
     # -- projects ------------------------------------------------------
@@ -269,21 +269,6 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
             "resolved": bool(row["resolved"]) if row["resolved"] is not None else False,
         }
 
-    @app.post("/api/runs/{run_id}/advise")
-    def advise_failure(run_id: str, model: str = advisor.DEFAULT_MODEL):
-        failure = storage.get_failure(run_id)
-        if failure is None:
-            raise HTTPException(404, f"Run '{run_id}' did not fail")
-        if not advisor.is_available():
-            return {"available": False, "text": None}
-        capsule = {
-            "exception_type": failure["exception_type"],
-            "message": failure["message"],
-            "diagnosis": _safe_json(failure["diagnosis_json"], {}),
-            "evidence": _safe_json(failure["evidence_json"], {}),
-        }
-        return {"available": True, "text": advisor.explain_failure(capsule, model=model)}
-
     # -- comparison ------------------------------------------------------
     @app.get("/api/compare")
     def compare(a: str, b: str):
@@ -291,13 +276,6 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
             return compare_runs(storage, a, b)
         except ValueError as e:
             raise HTTPException(404, str(e))
-
-    @app.post("/api/compare/advise")
-    def advise_compare(a: str, b: str, model: str = advisor.DEFAULT_MODEL):
-        if not advisor.is_available():
-            return {"available": False, "text": None}
-        diff = compare_runs(storage, a, b)
-        return {"available": True, "text": advisor.explain_diff(diff, model=model)}
 
     # -- campaigns --------------------------------------------------------
     @app.get("/api/campaigns")
@@ -376,9 +354,6 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
         return {
             "data_directory": storage.root,
             "database_path": storage.db_path,
-            "ollama_available": advisor.is_available(),
-            "ollama_host": advisor.DEFAULT_HOST,
-            "ollama_default_model": advisor.DEFAULT_MODEL,
             "gpu": collectors.collect_gpu_info(),
         }
 

@@ -5,7 +5,7 @@ failure capsules, deterministic diagnosis, structured run diff, reproduction
 capsule export, CLI), the **notebook integration** (`%load_ext watcherml`,
 automatic failure capture without a `with` block), an **optional Ollama
 advisor** (plain-language failure/diff explanations, all clearly labeled and
-fully optional), an **experimental autopilot** iteration loop, the **OOM
+fully optional), a **deterministic, bounded CUDA OOM recovery workflow** iteration loop, the **OOM
 Recovery Agent** (`watcher.recover_from_oom` — Observe/Diagnose/Plan/
 Validate/Probe/Evaluate/Remember, policy-engine-gated, full audit trail),
 **real similarity-based nearest-successful-run selection** (`similarity.py`

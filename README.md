@@ -267,11 +267,7 @@ capture, CPU/RAM/GPU background sampling, metric + artifact logging,
 deterministic failure classification, structured run diff, portable
 reproduction capsules, and a CLI.
 
-**Deliberately out of scope for v0.1:** a web UI (CLI-first for now — see
-`ROADMAP.md`), a hosted multi-tenant service, model serving, drift
-monitoring, dataset annotation, full hyperparameter optimization, Kubernetes,
-and a general model registry. These are documented as later milestones, not
-forgotten.
+
 
 ## Two modes (server mode not yet implemented in this scaffold)
 

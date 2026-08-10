@@ -19,7 +19,8 @@ notebook = ["ipython>=8.0"]
 ui = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
-watcher = "watcherml.cli:main"
+watcher = "watcherml.cli:main" #shorter compatibility alias to main watcherml executable
+watcherml = "watcherml.cli:main" #primary CLI name
 
 [tool.setuptools.packages.find]
 where = ["src"]
