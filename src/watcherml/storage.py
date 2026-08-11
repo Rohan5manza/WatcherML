@@ -12,19 +12,12 @@ import sqlite3
 import threading
 from typing import Optional
 
-from pathlib import Path
-
-
-def default_storage_root() -> Path:
-    configured = os.getenv("WATCHERML_HOME")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return Path.cwd() / ".watcherml"
+DEFAULT_DIR = os.path.join(os.getcwd(), ".watcherml")
 
 
 class Storage:
-    def __init__(self, root=None):
-        self.root = Path(root) if root else default_storage_root()
+    def __init__(self, root: str = DEFAULT_DIR):
+        self.root = root
         os.makedirs(self.root, exist_ok=True)
         os.makedirs(os.path.join(self.root, "artifacts"), exist_ok=True)
         self.db_path = os.path.join(self.root, "watcher.db")
@@ -65,13 +58,17 @@ class Storage:
                     resource_json TEXT,
                     dataset_fingerprint TEXT,
                     reproduction_score REAL,
-                    warnings_json TEXT
+                    warnings_json TEXT,
+                    capsule_schema_version TEXT,
+                    capture_completeness REAL
                 )
             """)
             self._migrate_add_column("runs", "display_name", "TEXT")
             self._migrate_add_column("runs", "tags_json", "TEXT")
             self._migrate_add_column("runs", "resolved", "INTEGER DEFAULT 0")
             self._migrate_add_column("runs", "resolved_note", "TEXT")
+            self._migrate_add_column("runs", "capsule_schema_version", "TEXT")
+            self._migrate_add_column("runs", "capture_completeness", "REAL")
             c.execute("""
                 CREATE TABLE IF NOT EXISTS metrics (
                     run_id TEXT,
@@ -96,9 +93,17 @@ class Storage:
                     message TEXT,
                     traceback TEXT,
                     diagnosis_json TEXT,
-                    evidence_json TEXT
+                    evidence_json TEXT,
+                    capsule_schema_version TEXT,
+                    failure_class TEXT,
+                    captured_at REAL,
+                    capsule_json TEXT
                 )
             """)
+            self._migrate_add_column("failures", "capsule_schema_version", "TEXT")
+            self._migrate_add_column("failures", "failure_class", "TEXT")
+            self._migrate_add_column("failures", "captured_at", "REAL")
+            self._migrate_add_column("failures", "capsule_json", "TEXT")
             c.execute("""
                 CREATE TABLE IF NOT EXISTS resource_samples (
                     run_id TEXT,
@@ -151,7 +156,7 @@ class Storage:
                            "resource_json", "warnings_json"}
             row = dict(existing) if existing else {"run_id": run_id}
             for k, v in fields.items():
-                row[k] = json.dumps(v) if k in json_fields else v
+                row[k] = json.dumps(v, sort_keys=True, default=str) if k in json_fields else v
             cols = list(row.keys())
             placeholders = ",".join("?" for _ in cols)
             updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "run_id")
@@ -216,14 +221,27 @@ class Storage:
 
     # -- failures ---------------------------------------------------------
     def save_failure(self, run_id: str, exception_type: str, message: str,
-                      traceback_str: str, diagnosis: dict, evidence: dict):
+                     traceback_str: str, diagnosis: dict, evidence: dict,
+                     capsule: Optional[dict] = None):
+        """Persist both query-friendly columns and the complete public capsule.
+
+        ``capsule`` is optional so older internal callers keep working during
+        the v1 migration. New failure paths must always provide it.
+        """
+        schema_version = (capsule or {}).get("capsule_schema_version")
+        failure_class = (capsule or {}).get("failure_class") or diagnosis.get("rule")
+        captured_at = (capsule or {}).get("captured_at")
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO failures "
-                "(run_id, exception_type, message, traceback, diagnosis_json, evidence_json) "
-                "VALUES (?,?,?,?,?,?)",
+                "(run_id, exception_type, message, traceback, diagnosis_json, evidence_json, "
+                "capsule_schema_version, failure_class, captured_at, capsule_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (run_id, exception_type, message, traceback_str,
-                 json.dumps(diagnosis), json.dumps(evidence)),
+                 json.dumps(diagnosis, sort_keys=True, default=str),
+                 json.dumps(evidence, sort_keys=True, default=str),
+                 schema_version, failure_class, captured_at,
+                 json.dumps(capsule, sort_keys=True, default=str) if capsule else None),
             )
             self._conn.commit()
 
@@ -231,6 +249,29 @@ class Storage:
         with self._lock:
             cur = self._conn.execute("SELECT * FROM failures WHERE run_id=?", (run_id,))
             return cur.fetchone()
+
+    def get_failure_capsule(self, run_id: str) -> Optional[dict]:
+        """Return the full v1 capsule, or a marked legacy view for old rows."""
+        row = self.get_failure(run_id)
+        if row is None:
+            return None
+        if row["capsule_json"]:
+            return json.loads(row["capsule_json"])
+        diagnosis = json.loads(row["diagnosis_json"] or "{}")
+        evidence = json.loads(row["evidence_json"] or "{}")
+        return {
+            "capsule_schema_version": row["capsule_schema_version"] or "legacy",
+            "run_id": run_id,
+            "exception_type": row["exception_type"],
+            "message": row["message"],
+            "traceback": row["traceback"],
+            "failure_class": row["failure_class"] or diagnosis.get("rule", "unclassified"),
+            "classification": diagnosis,
+            "diagnosis": diagnosis,
+            "evidence": evidence,
+            "evidence_index": [],
+            "capture_completeness": None,
+        }
 
     def list_failures(self, project: Optional[str] = None):
         with self._lock:
@@ -312,6 +353,8 @@ class Storage:
                 FROM recovery_trials rt
                 JOIN recovery_campaigns rc ON rt.campaign_id = rc.campaign_id
                 WHERE rt.phase = 'full'
+                AND rt.verified = 1
+                AND rt.outcome = 'success'
             """)
             trial_rows = cur.fetchall()
 

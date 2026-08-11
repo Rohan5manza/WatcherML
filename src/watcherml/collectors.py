@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -74,12 +75,28 @@ def collect_env_info() -> dict:
     except Exception:
         pass
 
-    return {
+    info = {
         "python_version": sys.version.split()[0],
         "platform": sys.platform,
         "packages": packages,
         "package_count": len(packages),
     }
+    info["fingerprint"] = environment_fingerprint(info)
+    return info
+
+
+def environment_fingerprint(env_info: dict) -> str:
+    """Stable fingerprint of the Python/platform/package environment."""
+    payload = {
+        "python_version": env_info.get("python_version"),
+        "platform": env_info.get("platform"),
+        "packages": {
+            str(name).lower(): version
+            for name, version in sorted((env_info.get("packages") or {}).items())
+        },
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------
@@ -108,6 +125,80 @@ def collect_gpu_info() -> dict:
         })
     cuda_version = _run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"])
     return {"available": True, "gpus": gpus, "driver_version": cuda_version}
+
+
+def collect_torch_cuda_state() -> dict:
+    """Capture allocator state after a failure without requiring PyTorch.
+
+    Every operation is best-effort.  A collector failure must never replace
+    or mask the user's original training exception.
+    """
+    state = {
+        "torch_available": False,
+        "cuda_available": False,
+        "torch_version": None,
+        "cuda_runtime_version": None,
+        "cudnn_version": None,
+        "allocator_config": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    }
+    try:
+        import torch  # type: ignore
+    except Exception:
+        return state
+
+    state["torch_available"] = True
+    state["torch_version"] = str(getattr(torch, "__version__", None) or "") or None
+    version = getattr(torch, "version", None)
+    state["cuda_runtime_version"] = getattr(version, "cuda", None)
+
+    try:
+        state["cudnn_version"] = torch.backends.cudnn.version()
+    except Exception:
+        pass
+
+    try:
+        state["cuda_available"] = bool(torch.cuda.is_available())
+    except Exception:
+        return state
+    if not state["cuda_available"]:
+        return state
+
+    try:
+        device_index = int(torch.cuda.current_device())
+        state["device_index"] = device_index
+        state["device_name"] = str(torch.cuda.get_device_name(device_index))
+    except Exception:
+        device_index = None
+
+    # Keep raw bytes: they are exact, lossless, and easy for policy code to use.
+    for key, getter in (
+        ("allocated_bytes", getattr(torch.cuda, "memory_allocated", None)),
+        ("reserved_bytes", getattr(torch.cuda, "memory_reserved", None)),
+        ("max_allocated_bytes", getattr(torch.cuda, "max_memory_allocated", None)),
+        ("max_reserved_bytes", getattr(torch.cuda, "max_memory_reserved", None)),
+    ):
+        if getter is None:
+            continue
+        try:
+            state[key] = int(getter(device_index)) if device_index is not None else int(getter())
+        except Exception:
+            pass
+
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
+        state["free_bytes"] = int(free_bytes)
+        state["total_bytes"] = int(total_bytes)
+    except Exception:
+        pass
+
+    try:
+        stats = torch.cuda.memory_stats(device_index)
+        state["inactive_split_bytes"] = int(
+            stats.get("inactive_split_bytes.all.current", 0))
+        state["oom_count"] = int(stats.get("num_ooms", 0))
+    except Exception:
+        pass
+    return state
 
 
 def _to_num(s):

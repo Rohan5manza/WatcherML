@@ -1,6 +1,5 @@
 /* WatcherML -- "scientific instrument" theme: deep blue-black background,
-   mint-green signal accent for active/live state, violet reserved for
-   AI/Ollama-attributed content, and soft red for failure states. The blue
+   mint-green signal accent for active/live state, The blue
    foundation keeps the interface technical and atmospheric without losing
    the provenance semantics carried by accent colors. */
 
@@ -194,11 +193,11 @@ h2.section-title {
 .decision-pill.rejected { color: var(--signal-red); background: var(--signal-red-dim); }
 
 /* provenance tags -- color itself carries meaning: mint=verified,
-   violet=Ollama-generated, ink=rule-based/calculated */
+   */
 .provenance { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; font-weight: 600; }
 .provenance.rule-based { color: var(--ink-muted); background: var(--bg-inset); border: 1px solid var(--border-hairline-strong); }
 .provenance.calculated { color: #93c5fd; background: #16202f; border: 1px solid #1e3049; }
-.provenance.ollama { color: var(--signal-violet); background: var(--signal-violet-dim); border: 1px solid #33285c; }
+
 .provenance.verified { color: var(--signal-mint-bright); background: var(--signal-mint-dim); border: 1px solid #1f4a34; }
 
 /* evidence chips */

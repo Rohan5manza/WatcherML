@@ -248,25 +248,51 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
         row = storage.get_run(run_id)
         if row is None:
             raise HTTPException(404, f"Run '{run_id}' not found")
-        failure = storage.get_failure(run_id)
-        if failure is None:
+
+        capsule = storage.get_failure_capsule(run_id)
+        if capsule is None:
             raise HTTPException(404, f"Run '{run_id}' did not fail")
-        diagnosis = _safe_json(failure["diagnosis_json"], {})
-        evidence = _safe_json(failure["evidence_json"], {})
+
+        evidence = capsule.get("evidence") or {}
+
+        # Compatibility for failures recorded before capsule schema v1.
+        if capsule.get("capsule_schema_version") == "legacy":
+            classification = (
+                capsule.get("classification")
+                or capsule.get("diagnosis")
+                or {}
+            )
+
+            nearest_success = compare_to_last_success(
+                storage,
+                row["project"],
+                run_id,
+            )
+
+            capsule = {
+                **capsule,
+                "evidence_index": build_evidence_index(evidence),
+                "similar_previous_failures": find_similar_failures(
+                    storage,
+                    row["project"],
+                    run_id,
+                    classification.get("rule", ""),
+                ),
+                "nearest_successful_run": nearest_success,
+                "comparison_to_last_success": nearest_success,
+            }
+
         return {
-            "run_id": run_id,
+            **capsule,
             "display_name": _display_name(row),
-            "exception_type": failure["exception_type"],
-            "message": failure["message"],
-            "traceback": failure["traceback"],
-            "diagnosis": diagnosis,
-            "evidence": evidence,
-            "evidence_index": build_evidence_index(evidence),
-            "similar_previous_failures": find_similar_failures(
-                storage, row["project"], run_id, diagnosis.get("rule", "")),
-            "comparison_to_last_success": compare_to_last_success(storage, row["project"], run_id),
-            "simulated": bool((evidence.get("config") or {}).get("_simulated")),
-            "resolved": bool(row["resolved"]) if row["resolved"] is not None else False,
+            "simulated": bool(
+                (evidence.get("config") or {}).get("_simulated")
+            ),
+            "resolved": (
+                bool(row["resolved"])
+                if row["resolved"] is not None
+                else False
+            ),
         }
 
     # -- comparison ------------------------------------------------------

@@ -12,6 +12,8 @@ Every run leaves a receipt. Every failure leaves evidence. WatcherML helps you i
 from .recovery import RecoveryContract, recover_from_oom
 from .run import Run, init
 from .storage import Storage
+from .capsule_schema import CAPSULE_SCHEMA_VERSION
+
 
 __version__ = "0.1.0"
 

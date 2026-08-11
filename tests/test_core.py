@@ -1,18 +1,15 @@
-"""Core test suite. Run with: pytest tests/ -v
+"""Core WatcherML tests.
 
-Covers: run lifecycle, failure capsule diagnosis, structured diff, reproduction
-capsule export, the Ollama advisor client (against a fake local server -- no
-real Ollama install or network access required)
+Covers run lifecycle, deterministic failure diagnosis, run comparison,
+capsule export, and secret redaction.
 """
 import json
-import threading
 import zipfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
+
 
 import pytest
 
 import watcherml as watcher
-from watcherml import advisor
 from watcherml.diff import compare_runs
 from watcherml.export import export_capsule
 from watcherml.storage import Storage
@@ -74,72 +71,43 @@ def test_compare_runs_reports_config_and_metric_changes(storage):
 
 
 def test_export_capsule_contains_manifest_and_config(storage, tmp_path):
-    with watcher.init(project="t", config={"lr": 0.01, "seed": 1}, storage=storage) as run:
+    with watcher.init(
+        project="t",
+        config={"lr": 0.01, "seed": 1},
+        storage=storage,
+    ) as run:
         run.log_metric("acc", 0.8)
-    out_path = export_capsule(storage, run.run_id, out_path=str(tmp_path / "capsule.zip"))
+
+    out_path = export_capsule(
+        storage,
+        run.run_id,
+        out_path=str(tmp_path / "capsule.zip"),
+    )
+
     with zipfile.ZipFile(out_path) as zf:
         names = zf.namelist()
+
         assert "manifest.json" in names
+        assert "config.json" in names
+
         manifest = json.loads(zf.read("manifest.json"))
-        assert manifest["config"]["seed"] == 1
+        config = json.loads(zf.read("config.json"))
 
+        assert manifest["schema"]["name"] == "watcherml.run-export"
+        assert manifest["schema"]["version"] == "1.0"
+        assert config["seed"] == 1
 
+        manifest_paths = {
+            item["path"]
+            for item in manifest["contents"]
+        }
+        assert "config.json" in manifest_paths
+
+        
 def test_redact_hides_common_secret_patterns():
     from watcherml import redact
     text = 'api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'
     assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in redact.redact(text)
 
-
-# --- advisor tests, against a fake local Ollama-compatible server ------------
-
-class _FakeOllamaHandler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def do_GET(self):
-        if self.path == "/api/tags":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"models": []}')
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        json.loads(self.rfile.read(length))
-        reply = json.dumps({"config": {"batch_size": 16}, "rationale": "test"})
-        payload = json.dumps({"message": {"role": "assistant", "content": reply}}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(payload)
-
-
-@pytest.fixture
-def fake_ollama():
-    server = HTTPServer(("localhost", 11434), _FakeOllamaHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield "http://localhost:11434"
-    server.shutdown()
-    server.server_close()
-
-
-def test_advisor_degrades_silently_without_ollama():
-    assert advisor.is_available(host="http://localhost:19999") is False
-    result = advisor.explain_failure(
-        {"exception_type": "X", "message": "y",
-         "diagnosis": {"rule": "r", "summary": "s"}, "evidence": {}},
-        host="http://localhost:19999",
-    )
-    assert result is None
-
-
-def test_advisor_suggest_next_config_against_fake_server(fake_ollama):
-    assert advisor.is_available(host=fake_ollama) is True
-    suggestion = advisor.suggest_next_config(
-        run_history=[{"config": {"batch_size": 32}, "status": "failed"}],
-        goal_metric="val_accuracy", host=fake_ollama,
-    )
-    assert suggestion["config"]["batch_size"] == 16
 
 

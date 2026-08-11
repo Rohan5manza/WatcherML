@@ -164,12 +164,15 @@ class Run:
             resource_json=resource_summary,
             dataset_fingerprint=self.dataset_fingerprint,
             warnings_json=self.warnings,
+            capsule_schema_version=capsule["capsule_schema_version"],
+            capture_completeness=capsule["capture_completeness"],
         )
         # Samples are no longer batch-inserted here -- they were already
         # persisted live, one at a time, via _flush_sample() as they were taken.
         self.storage.save_failure(
             self.run_id, capsule["exception_type"], capsule["message"],
             capsule["traceback"], capsule["diagnosis"], capsule["evidence"],
+            capsule=capsule,
         )
         print("\n" + format_capsule_report(capsule) + "\n", file=sys.stderr)
 

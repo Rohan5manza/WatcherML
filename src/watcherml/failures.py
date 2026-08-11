@@ -12,10 +12,22 @@ from typing import Optional
 
 
 def _rule_cuda_oom(exc_type, message, tb_str):
-    if "out of memory" in message.lower() and "cuda" in message.lower():
+    message_lower = message.lower()
+    cuda_oom_message = bool(re.search(
+        r"(?:cuda|cudnn|cublas).*out of memory|out of memory.*(?:cuda|cudnn|cublas)",
+        message_lower,
+    ))
+    torch_oom_type = exc_type in {"OutOfMemoryError", "CUDAOutOfMemoryError"}
+    if cuda_oom_message or (torch_oom_type and ("cuda" in message_lower or "gpu" in message_lower)):
         return {
             "rule": "cuda_out_of_memory",
-            "evidence_categories": ["config", "resource_state_at_failure", "gpu"],
+            "rule_version": "1.0",
+            "match_kind": "deterministic",
+            "recoverable_by_bounded_trial": True,
+            "evidence_categories": [
+                "config", "training_state", "resource_state_at_failure",
+                "gpu", "framework",
+            ],
             "summary": "CUDA ran out of GPU memory during this run.",
             "likely_cause": "Batch size, model size, or sequence length exceeded available VRAM.",
             "suggested_actions": [
@@ -140,9 +152,15 @@ def diagnose(exc_type: str, message: str, tb_str: str) -> dict:
     for rule in RULES:
         result = rule(exc_type, message or "", tb_str or "")
         if result:
+            result.setdefault("rule_version", "1.0")
+            result.setdefault("match_kind", "deterministic")
+            result.setdefault("recoverable_by_bounded_trial", False)
             return result
     return {
         "rule": "unclassified",
+        "rule_version": "1.0",
+        "match_kind": "deterministic",
+        "recoverable_by_bounded_trial": False,
         "summary": "This failure did not match a known deterministic pattern.",
         "likely_cause": None,
         "evidence_categories": [],

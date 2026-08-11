@@ -84,11 +84,6 @@ def test_compare_endpoint(client_and_ids):
     assert "batch_size" in changed_keys
 
 
-def test_advise_degrades_without_ollama(client_and_ids):
-    client, failed_id, _, _ = client_and_ids
-    resp = client.post(f"/api/runs/{failed_id}/advise")
-    assert resp.status_code == 200
-    assert resp.json() == {"available": False, "text": None}
 
 
 def test_run_not_found_is_404(client_and_ids):
@@ -193,11 +188,18 @@ def test_campaigns_and_memory_endpoints_after_a_real_recovery(tmp_path):
     assert mem[0]["attempts"] >= 1
     assert 0.0 <= mem[0]["success_rate"] <= 1.0
 
-
 def test_settings_endpoint(client_and_ids):
     client, _, _, _ = client_and_ids
-    resp = client.get("/api/settings")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "ollama_available" in body
-    assert "database_path" in body
+
+    response = client.get("/api/settings")
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert "data_directory" in body
+    assert "database" in body
+    assert "gpu" in body
+
+    assert "ollama_available" not in body
+    assert "ollama_host" not in body
+    assert "ollama_default_model" not in body

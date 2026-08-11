@@ -1,9 +1,6 @@
-"""Tests for the OOM Recovery Agent: policy engine, observer, deterministic
-fallback path (no Ollama), and the Ollama-guided path (against a fake local
-server implementing Ollama's real API contract)."""
+"""Tests for deterministic, bounded CUDA OOM recovery campaigns."""
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+
 
 import pytest
 
@@ -42,16 +39,23 @@ def test_validate_patch_accepts_allowed_keys_only():
     assert rejected == ["learning_rate"]
 
 
-def test_validate_patch_rejects_invalid_values_for_allowed_keys():
+def test_validate_patch_rejects_invalid_and_non_v1_values():
     cleaned, rejected = recovery.validate_patch({
-        "batch_size": -1,             # below min
-        "precision": "int8",          # not in allowed choices
-        "gradient_checkpointing": "yes",  # wrong type (not bool)
-        "num_workers": 4,             # valid
+        "batch_size": -1,
+        "gradient_accumulation_steps": 0,
+        "gradient_checkpointing": "yes",
+        "precision": "bf16",
+        "num_workers": 4,
     })
-    assert cleaned == {"num_workers": 4}
-    assert set(rejected) == {"batch_size", "precision", "gradient_checkpointing"}
 
+    assert cleaned == {}
+    assert set(rejected) == {
+        "batch_size",
+        "gradient_accumulation_steps",
+        "gradient_checkpointing",
+        "precision",
+        "num_workers",
+    }
 
 def test_validate_patch_handles_non_dict_input():
     cleaned, rejected = recovery.validate_patch("not a dict")
@@ -88,9 +92,7 @@ def test_observe_raises_for_unknown_run(storage):
         recovery.observe(storage, "does-not-exist")
 
 
-# ============================================================================
-# Full campaign, deterministic fallback path (no Ollama running)
-# ============================================================================
+
 
 def test_recover_from_oom_deterministic_fallback_finds_a_working_config(storage, failed_oom_run):
     def train_fn(config, max_steps=None):
@@ -148,82 +150,6 @@ def test_recover_from_oom_falls_back_when_train_fn_has_no_max_steps_param(storag
     assert report["best_run_id"] is not None
 
 
-# ============================================================================
-# Full campaign, Ollama-guided path (against a fake local server)
-# ============================================================================
-
-class _FakeOllamaHandler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def do_GET(self):
-        if self.path == "/api/tags":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"models": []}')
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
-        self.server.received_payloads.append(body)  # so tests can inspect keep_alive
-        user_msg = body["messages"][-1]["content"]
-        if "Rank the likely causes" in user_msg:
-            reply = json.dumps({"hypotheses": [
-                {"cause": "batch_size_too_large", "explanation": "test", "confidence": 0.9}
-            ]})
-        elif "Propose 2-3 candidate patches" in user_msg:
-            reply = json.dumps({"candidates": [
-                {"patch": {"batch_size": 8}, "rationale": "smaller batch", "confidence": 0.8},
-                {"patch": {"precision": "bf16", "not_allowed_key": 123},
-                 "rationale": "mixed precision", "confidence": 0.6},
-            ]})
-        else:
-            reply = "{}"
-        payload = json.dumps({"message": {"role": "assistant", "content": reply}}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(payload)
-
-
-@pytest.fixture
-def fake_ollama():
-    server = HTTPServer(("localhost", 11434), _FakeOllamaHandler)
-    server.received_payloads = []
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    server.shutdown()
-    server.server_close()
-
-
-def test_recover_from_oom_with_ollama_guided_candidates(storage, failed_oom_run, fake_ollama):
-    def train_fn(config, max_steps=None):
-        if config.get("batch_size", 32) >= 32:
-            raise RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")
-        return {"val_accuracy": 0.85}
-
-    report = recovery.recover_from_oom(
-        project="t", failed_run_id=failed_oom_run, train_fn=train_fn, storage=storage,
-    )
-    # the second fake candidate had an extra disallowed key -- policy engine must
-    # have stripped it, and the valid "precision" key should still have been used
-    assert report["rejected_patch_keys"] >= 1
-    assert report["best_run_id"] is not None
-
-
-def test_recovery_planner_keep_alive_is_zero_by_default(storage, failed_oom_run, fake_ollama):
-    """Buffy hardware constraint: the recovery agent's LLM calls must unload
-    the model immediately (keep_alive=0) so a training trial gets the full GPU."""
-    def train_fn(config, max_steps=None):
-        return {"val_accuracy": 0.9}
-
-    recovery.recover_from_oom(
-        project="t", failed_run_id=failed_oom_run, train_fn=train_fn, storage=storage,
-    )
-    assert len(fake_ollama.received_payloads) >= 2
-    assert all(p.get("keep_alive") == 0 for p in fake_ollama.received_payloads)
 
 
 # ============================================================================

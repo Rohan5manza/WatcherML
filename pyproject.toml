@@ -7,7 +7,7 @@ name = "watcherml"
 version = "0.1.0"
 description = "A local-first experiment flight recorder for notebook-first ML: captures code, environment, GPU/system state, and failure context needed to reproduce and debug every run."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "psutil>=5.9",

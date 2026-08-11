@@ -231,24 +231,39 @@ def cmd_runs(args) -> None:
 
 def cmd_inspect(args) -> None:
     storage = Storage()
+
     try:
         row = storage.get_run(args.run_id)
         if row is None:
             raise ValueError(f"Run '{args.run_id}' not found.")
 
-        capsule = _load_capsule(storage, args.run_id)
+        # Failed runs have a complete, persisted capsule.
+        capsule = storage.get_failure_capsule(args.run_id)
         if capsule is not None:
-            _write_or_print(_render_capsule(capsule, args.format), args.output)
+            _write_or_print(
+                _render_capsule(capsule, args.format),
+                args.output,
+            )
             return
 
+        # No capsule means this is normally a successful/running run.
         config = _safe_json(row["config_json"], {})
         final_metrics = storage.final_metrics(args.run_id)
+
         if args.format == "json":
             payload = dict(row)
+            payload.pop("config_json", None)
             payload["config"] = config
             payload["final_metrics"] = final_metrics
+
             _write_or_print(
-                json.dumps(payload, indent=2, ensure_ascii=False), args.output
+                json.dumps(
+                    payload,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                args.output,
             )
             return
 
@@ -269,30 +284,43 @@ def cmd_inspect(args) -> None:
                 "## Final metrics",
                 "",
             ]
-            lines.extend(f"- `{name}`: {value}" for name, value in final_metrics.items())
+
+            if final_metrics:
+                lines.extend(
+                    f"- `{name}`: {value}"
+                    for name, value in final_metrics.items()
+                )
+            else:
+                lines.append("- No metrics recorded.")
+
             _write_or_print("\n".join(lines), args.output)
             return
 
-        print(f"Run: {row['run_id']}  ({row['project']})")
-        print(f"Status: {row['exit_status']}")
-        if row["duration_seconds"] is not None:
-            print(f"Duration: {row['duration_seconds']:.1f}s")
-        print(f"Config: {json.dumps(config, ensure_ascii=False)}")
-        print("Final metrics:")
-        if final_metrics:
-            for name, value in final_metrics.items():
-                print(f"  {name}: {value}")
-        else:
-            print("  none")
+        lines = [
+            f"Run: {row['run_id']}  ({row['project']})",
+            f"Status: {row['exit_status']}",
+        ]
 
-        completeness = _row_get(row, "capture_completeness")
-        if completeness is None:
-            completeness = _row_get(row, "reproduction_score")
-        if completeness is not None:
-            print(f"Capture completeness: {int(completeness)}/10")
+        if row["duration_seconds"] is not None:
+            lines.append(f"Duration: {row['duration_seconds']:.1f}s")
+
+        lines.append(
+            f"Config: {json.dumps(config, ensure_ascii=False)}"
+        )
+        lines.append("Final metrics:")
+
+        if final_metrics:
+            lines.extend(
+                f"  {name}: {value}"
+                for name, value in final_metrics.items()
+            )
+        else:
+            lines.append("  none")
+
+        _write_or_print("\n".join(lines), args.output)
+
     finally:
         _close_storage(storage)
-
 
 def cmd_capsule(args) -> None:
     storage = Storage()
