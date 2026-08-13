@@ -455,24 +455,37 @@ def _process_group_options() -> dict:
 
 
 def _terminate_process_group(process, grace_seconds: float) -> str:
-    if process.poll() is not None:
-        return "already_exited"
-
     if os.name == "posix":
+        process_group_id = process.pid
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process_group_id, signal.SIGTERM)
         except ProcessLookupError:
+            if process.poll() is None:
+                process.wait()
             return "already_exited"
-        try:
-            process.wait(timeout=grace_seconds)
-            return "sigterm"
-        except subprocess.TimeoutExpired:
+
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            process.poll()  # reap the group leader if it has already exited
+            if not _posix_process_group_exists(process_group_id):
+                break
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+        termination = "sigterm"
+        process.poll()
+        if _posix_process_group_exists(process_group_id):
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process_group_id, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            termination = "sigkill"
+
+        if process.poll() is None:
             process.wait()
-            return "sigkill"
+        return termination
+
+    if process.poll() is not None:
+        return "already_exited"
 
     # Windows fallback. A future Windows executor can use Job Objects for
     # stronger descendant cleanup; macOS/Linux are the v1 acceptance targets.
@@ -484,6 +497,17 @@ def _terminate_process_group(process, grace_seconds: float) -> str:
         process.kill()
         process.wait()
         return "kill"
+
+
+def _posix_process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The group exists even if the current user cannot signal it.
+        return True
 
 
 def _mark_timed_out_run(
