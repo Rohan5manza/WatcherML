@@ -307,21 +307,44 @@ def create_app(storage: Optional[Storage] = None) -> FastAPI:
     @app.get("/api/campaigns")
     def list_campaigns(project: Optional[str] = None):
         rows = storage.list_recovery_campaigns(project=project)
-        out = []
+        campaigns = []
+
         for row in rows:
             trials = storage.list_recovery_trials(row["campaign_id"])
-            out.append({
+            report = _safe_json(row["report_json"], {})
+
+            campaigns.append({
                 "campaign_id": row["campaign_id"],
                 "project": row["project"],
                 "source_run_id": row["source_run_id"],
                 "started_at": row["started_at"],
                 "ended_at": row["ended_at"],
                 "stopped_reason": row["stopped_reason"],
+
+                # Populated only after confirmation verification.
                 "best_run_id": row["best_run_id"],
+
+                # Completed trial awaiting subprocess confirmation.
+                "provisional_best_run_id": report.get(
+                    "provisional_best_run_id"
+                ),
+                "provisional_best_patch": report.get(
+                    "provisional_best_patch"
+                ),
+                "verification_status": report.get(
+                    "verification_status",
+                    "not_recovered",
+                ),
+
                 "trial_count": len(trials),
-                "status": "active" if row["ended_at"] is None else "stopped",
+                "status": (
+                    "active"
+                    if row["ended_at"] is None
+                    else "stopped"
+                ),
             })
-        return out
+
+        return campaigns
 
     @app.get("/api/campaigns/{campaign_id}")
     def get_campaign(campaign_id: str):

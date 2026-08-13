@@ -13,6 +13,7 @@ from .recovery import RecoveryContract, recover_from_oom
 from .run import Run, init
 from .storage import Storage
 from .capsule_schema import CAPSULE_SCHEMA_VERSION
+from .entrypoint import TrainingEntrypoint, validate_entrypoint
 
 
 __version__ = "0.1.0"
@@ -24,4 +25,7 @@ __all__ = [
     "recover_from_oom",
     "RecoveryContract",
     "__version__",
+    "TrainingEntrypoint",
+"validate_entrypoint",
+"CAPSULE_SCHEMA_VERSION"
 ]

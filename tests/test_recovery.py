@@ -33,10 +33,19 @@ def failed_oom_run(storage):
 
 def test_validate_patch_accepts_allowed_keys_only():
     cleaned, rejected = recovery.validate_patch({
-        "batch_size": 8, "precision": "bf16", "learning_rate": 1e-5,  # not allowed
+        "batch_size": 8,
+        "precision": "bf16",
+        "learning_rate": 1e-5,
     })
-    assert cleaned == {"batch_size": 8, "precision": "bf16"}
-    assert rejected == ["learning_rate"]
+
+    assert cleaned == {
+        "batch_size": 8,
+    }
+
+    assert set(rejected) == {
+        "precision",
+        "learning_rate",
+    }
 
 
 def test_validate_patch_rejects_invalid_and_non_v1_values():
@@ -103,8 +112,15 @@ def test_recover_from_oom_deterministic_fallback_finds_a_working_config(storage,
     report = recovery.recover_from_oom(
         project="t", failed_run_id=failed_oom_run, train_fn=train_fn, storage=storage,
     )
-    assert report["best_run_id"] is not None
-    best_config = json.loads(storage.get_run(report["best_run_id"])["config_json"])
+    assert report["best_run_id"] is None
+    assert report["verification_status"] == "pending_confirmation"
+
+    provisional_run_id = report["provisional_best_run_id"]
+    assert provisional_run_id is not None
+
+    best_config = json.loads(
+        storage.get_run(provisional_run_id)["config_json"]
+)
     assert best_config["batch_size"] < 32
     # every trial (probe + full) must be independently inspectable as a normal run
     trials = storage.list_recovery_trials(report["campaign_id"])
@@ -147,7 +163,9 @@ def test_recover_from_oom_falls_back_when_train_fn_has_no_max_steps_param(storag
         project="t", failed_run_id=failed_oom_run, train_fn=train_fn_no_probe_support,
         storage=storage,
     )
-    assert report["best_run_id"] is not None
+    assert report["best_run_id"] is None
+    assert report["provisional_best_run_id"] is not None
+    assert report["verification_status"] == "pending_confirmation"
 
 
 

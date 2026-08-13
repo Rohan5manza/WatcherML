@@ -338,58 +338,164 @@ class Storage:
             self._conn.commit()
 
     # -- resolution memory ---------------------------------------------------
-    def resolution_memory(self, project: Optional[str] = None) -> list:
-        """Aggregates every recorded recovery trial into 'has this failure
-        signature been seen before, and what actually worked' -- built
-        entirely from data already collected by the recovery agent, not a
-        separate tracked concept. A signature is (failure_class, patch shape);
-        'patch shape' is the sorted tuple of changed keys, e.g. ('batch_size',
-        'gradient_accumulation_steps') -- coarser than the exact values, so
-        cases with the same *kind* of fix group together.
+    def resolution_memory(
+    self,
+    project: Optional[str] = None,
+) -> list:
+        """Aggregate completed recovery trials by failure and intervention shape.
+
+        A full trial always counts as an attempt.
+
+        A successful full trial counts as a completed success, but it only counts
+        as verified when the independent confirmation verifier has promoted it.
+        These concepts must remain separate.
         """
         with self._lock:
-            cur = self._conn.execute("""
-                SELECT rt.patch_json, rt.outcome, rc.source_run_id, rc.project
-                FROM recovery_trials rt
-                JOIN recovery_campaigns rc ON rt.campaign_id = rc.campaign_id
-                WHERE rt.phase = 'full'
-                AND rt.verified = 1
-                AND rt.outcome = 'success'
-            """)
-            trial_rows = cur.fetchall()
+            if project is None:
+                cursor = self._conn.execute(
+                    """
+                    SELECT
+                        rt.patch_json,
+                        rt.outcome,
+                        rt.verified,
+                        rc.source_run_id,
+                        rc.project
+                    FROM recovery_trials AS rt
+                    JOIN recovery_campaigns AS rc
+                        ON rt.campaign_id = rc.campaign_id
+                    WHERE rt.phase = 'full'
+                    """
+                )
+            else:
+                cursor = self._conn.execute(
+                    """
+                    SELECT
+                        rt.patch_json,
+                        rt.outcome,
+                        rt.verified,
+                        rc.source_run_id,
+                        rc.project
+                    FROM recovery_trials AS rt
+                    JOIN recovery_campaigns AS rc
+                        ON rt.campaign_id = rc.campaign_id
+                    WHERE rt.phase = 'full'
+                    AND rc.project = ?
+                    """,
+                    (project,),
+                )
 
-        # failure_class per source_run_id, resolved outside the lock (separate query)
-        signatures: dict = {}
+            trial_rows = cursor.fetchall()
+
+        signatures = {}
+
         for row in trial_rows:
-            if project and row["project"] != project:
-                continue
-            failure_row = self.get_failure(row["source_run_id"])
+            failure_row = self.get_failure(
+                row["source_run_id"]
+            )
+
             if failure_row is None:
                 continue
-            diagnosis = json.loads(failure_row["diagnosis_json"] or "{}")
-            failure_class = diagnosis.get("rule", "unknown")
-            patch = json.loads(row["patch_json"] or "{}")
-            patch_shape = tuple(sorted(patch.keys()))
-            key = (failure_class, patch_shape)
-            entry = signatures.setdefault(key, {
-                "failure_class": failure_class,
-                "patch_keys": list(patch_shape),
-                "attempts": 0,
-                "successes": 0,
-                "example_patches": [],
-            })
+
+            diagnosis = json.loads(
+                failure_row["diagnosis_json"] or "{}"
+            )
+
+            failure_class = (
+                failure_row["failure_class"]
+                or diagnosis.get("rule")
+                or "unknown"
+            )
+
+            try:
+                patch = json.loads(
+                    row["patch_json"] or "{}"
+                )
+            except (TypeError, json.JSONDecodeError):
+                patch = {}
+
+            if not isinstance(patch, dict):
+                patch = {}
+
+            patch_shape = tuple(
+                sorted(patch.keys())
+            )
+
+            signature_key = (
+                failure_class,
+                patch_shape,
+            )
+
+            entry = signatures.setdefault(
+                signature_key,
+                {
+                    "failure_class": failure_class,
+                    "patch_keys": list(patch_shape),
+
+                    # Every full trial counts here.
+                    "attempts": 0,
+
+                    # Full trials that completed without failure.
+                    "completed_successes": 0,
+
+                    # Full trials independently confirmed later.
+                    "verified_successes": 0,
+
+                    "failed_attempts": 0,
+                    "example_patches": [],
+                },
+            )
+
             entry["attempts"] += 1
+
             if row["outcome"] == "success":
-                entry["successes"] += 1
-            if patch not in entry["example_patches"] and len(entry["example_patches"]) < 3:
+                entry["completed_successes"] += 1
+            else:
+                entry["failed_attempts"] += 1
+
+            if bool(row["verified"]):
+                entry["verified_successes"] += 1
+
+            if (
+                patch not in entry["example_patches"]
+                and len(entry["example_patches"]) < 3
+            ):
                 entry["example_patches"].append(patch)
 
         results = list(signatures.values())
-        for r in results:
-            r["success_rate"] = r["successes"] / r["attempts"] if r["attempts"] else 0.0
-        results.sort(key=lambda r: r["attempts"], reverse=True)
-        return results
 
+        for entry in results:
+            attempts = entry["attempts"]
+
+            entry["completion_rate"] = (
+                entry["completed_successes"] / attempts
+                if attempts
+                else 0.0
+            )
+
+            entry["verified_success_rate"] = (
+                entry["verified_successes"] / attempts
+                if attempts
+                else 0.0
+            )
+
+            # Compatibility fields for the current API/UI. Here, "success" means
+            # that a full trial completed, not that it was independently verified.
+            entry["successes"] = entry[
+                "completed_successes"
+            ]
+            entry["success_rate"] = entry[
+                "completion_rate"
+            ]
+
+        results.sort(
+            key=lambda entry: (
+                entry["attempts"],
+                entry["completed_successes"],
+            ),
+            reverse=True,
+        )
+
+        return results
     # -- recovery agent memory (campaigns + trials) --------------------------
     def create_recovery_campaign(self, campaign_id: str, project: str, source_run_id: str,
                                   contract: dict, started_at: float):

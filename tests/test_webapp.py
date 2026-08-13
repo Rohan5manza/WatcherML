@@ -175,8 +175,12 @@ def test_campaigns_and_memory_endpoints_after_a_real_recovery(tmp_path):
 
     campaigns = client.get("/api/campaigns").json()
     assert len(campaigns) == 1
-    campaign_id = campaigns[0]["campaign_id"]
-    assert campaigns[0]["best_run_id"] is not None
+    campaign = campaigns[0]
+    campaign_id = campaign["campaign_id"]
+
+    assert campaign["best_run_id"] is None
+    assert campaign["provisional_best_run_id"] is not None
+    assert campaign["verification_status"] == "pending_confirmation"
 
     detail = client.get(f"/api/campaigns/{campaign_id}").json()
     assert detail["trials"]
@@ -197,7 +201,7 @@ def test_settings_endpoint(client_and_ids):
     body = response.json()
 
     assert "data_directory" in body
-    assert "database" in body
+    assert "database_path" in body
     assert "gpu" in body
 
     assert "ollama_available" not in body
