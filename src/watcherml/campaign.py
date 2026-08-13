@@ -1,0 +1,1394 @@
+"""Bounded deterministic orchestration for WatcherML OOM recovery campaigns.
+
+This module connects the already-separated WatcherML v1 layers without
+collapsing their authority boundaries:
+
+* the OOM policy proposes interventions;
+* ``interventions.py`` resolves, authorizes, and materializes them;
+* this module schedules isolated probe, full, and confirmation trials;
+* ``ranking.py`` creates a provisional confirmation order; and
+* ``verifier.py`` is the only layer allowed to declare recovery.
+
+The orchestrator never invents a patch, retries a failed trial invisibly,
+selects a favorable subset of confirmations, or converts a ranking into a
+verdict.  Every attempted trial consumes the predeclared campaign budget.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import time
+from dataclasses import dataclass, field
+from numbers import Real
+from types import MappingProxyType
+from typing import Callable, Dict, Iterable, Optional, Protocol, Tuple
+
+from .interventions import (
+    InterventionApplication,
+    InterventionAuthorization,
+    ResolvedIntervention,
+    proposal_digest,
+)
+from .ranking import (
+    CandidateRanking,
+    RankingCandidate,
+    RankingPolicy,
+    rank_candidates,
+)
+from .recovery_contract import (
+    RecoveryContract,
+    WorkloadIdentity,
+    contract_digest,
+    validate_intervention_scope,
+)
+from .trial_protocol import TrialRequest
+from .trial_runner import PARENT_EXECUTION_STATUSES, TrialExecution
+from .verifier import (
+    ConfirmationEvidence,
+    RecoveryVerification,
+    configuration_digest,
+    verify_recovery,
+)
+
+
+CAMPAIGN_RESULT_SCHEMA_NAME = "watcherml.recovery-campaign-result"
+CAMPAIGN_RESULT_SCHEMA_VERSION = "1.0"
+CAMPAIGN_TRIAL_SCHEMA_NAME = "watcherml.campaign-trial"
+CAMPAIGN_TRIAL_SCHEMA_VERSION = "1.0"
+CAMPAIGN_OBSERVATION_SCHEMA_NAME = "watcherml.run-observation"
+CAMPAIGN_OBSERVATION_SCHEMA_VERSION = "1.0"
+
+CAMPAIGN_STATUSES = frozenset({"verified", "not_recovered", "stopped"})
+TRIAL_PHASES = frozenset({"probe", "full", "confirmation"})
+
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+
+
+class CampaignError(RuntimeError):
+    """Raised when campaign input or returned trial evidence is unsafe."""
+
+
+@dataclass(frozen=True)
+class RunObservation:
+    """Facts collected from persisted run/resource evidence after a trial.
+
+    Metrics intentionally do not live here.  Their canonical source is the
+    worker ``TrialResult`` embedded in ``TrialExecution``.  Keeping a single
+    source prevents callers from substituting better-looking metrics after a
+    process exits.
+    """
+
+    progress_steps: Optional[int]
+    peak_vram_bytes: Optional[int]
+    workload_identity: WorkloadIdentity = field(default_factory=WorkloadIdentity)
+    gpu_seconds: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.progress_steps is not None:
+            object.__setattr__(
+                self,
+                "progress_steps",
+                _nonnegative_int(self.progress_steps, "progress_steps"),
+            )
+        if self.peak_vram_bytes is not None:
+            object.__setattr__(
+                self,
+                "peak_vram_bytes",
+                _nonnegative_int(self.peak_vram_bytes, "peak_vram_bytes"),
+            )
+        if not isinstance(self.workload_identity, WorkloadIdentity):
+            raise CampaignError("workload_identity must be a WorkloadIdentity")
+        if self.gpu_seconds is not None:
+            object.__setattr__(
+                self,
+                "gpu_seconds",
+                _nonnegative_finite(self.gpu_seconds, "gpu_seconds"),
+            )
+
+    def to_dict(self) -> dict:
+        return {
+            "schema": {
+                "name": CAMPAIGN_OBSERVATION_SCHEMA_NAME,
+                "version": CAMPAIGN_OBSERVATION_SCHEMA_VERSION,
+            },
+            "progress_steps": self.progress_steps,
+            "peak_vram_bytes": self.peak_vram_bytes,
+            "workload_identity": self.workload_identity.to_dict(),
+            "gpu_seconds": self.gpu_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "RunObservation":
+        _validate_schema(
+            payload,
+            CAMPAIGN_OBSERVATION_SCHEMA_NAME,
+            CAMPAIGN_OBSERVATION_SCHEMA_VERSION,
+            "run observation",
+        )
+        _reject_unknown_fields(
+            payload,
+            {
+                "schema",
+                "progress_steps",
+                "peak_vram_bytes",
+                "workload_identity",
+                "gpu_seconds",
+            },
+            "run observation",
+        )
+        try:
+            return cls(
+                progress_steps=payload["progress_steps"],
+                peak_vram_bytes=payload["peak_vram_bytes"],
+                workload_identity=WorkloadIdentity.from_dict(
+                    payload["workload_identity"]
+                ),
+                gpu_seconds=payload["gpu_seconds"],
+            )
+        except KeyError as exc:
+            raise CampaignError(
+                "run observation is missing a required field"
+            ) from exc
+        except ValueError as exc:
+            if isinstance(exc, CampaignError):
+                raise
+            raise CampaignError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class ExecutedTrial:
+    """One executor return: parent manifest plus normalized run facts."""
+
+    execution: TrialExecution
+    observation: RunObservation
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution, TrialExecution):
+            raise CampaignError("execution must be a TrialExecution")
+        if not isinstance(self.observation, RunObservation):
+            raise CampaignError("observation must be a RunObservation")
+
+
+class CampaignExecutor(Protocol):
+    """Adapter implemented by the integration layer around ``run_trial``."""
+
+    def __call__(
+        self,
+        request: TrialRequest,
+        timeout_seconds: float,
+    ) -> ExecutedTrial:
+        ...
+
+
+@dataclass(frozen=True, init=False)
+class CampaignCandidate:
+    """A resolved intervention and its already-materialized trial inputs.
+
+    Configuration and environment mappings are sealed as canonical JSON so a
+    caller cannot mutate them after campaign validation.
+    """
+
+    resolved: ResolvedIntervention
+    authorization: Optional[InterventionAuthorization]
+    _config_json: str = field(repr=False)
+    _environment_json: str = field(repr=False)
+
+    def __init__(
+        self,
+        resolved: ResolvedIntervention,
+        application: InterventionApplication,
+    ) -> None:
+        if not isinstance(resolved, ResolvedIntervention):
+            raise CampaignError("resolved must be a ResolvedIntervention")
+        if not isinstance(application, InterventionApplication):
+            raise CampaignError(
+                "application must be an InterventionApplication"
+            )
+        if application.proposal_id != resolved.proposal.proposal_id:
+            raise CampaignError(
+                "application proposal_id does not match the intervention"
+            )
+        _validate_authorization_binding(resolved, application.authorization)
+        object.__setattr__(self, "resolved", resolved)
+        object.__setattr__(self, "authorization", application.authorization)
+        object.__setattr__(self, "_config_json", _stable_json(application.config))
+        object.__setattr__(
+            self,
+            "_environment_json",
+            _stable_json(application.environment_patch),
+        )
+
+    @property
+    def candidate_id(self) -> str:
+        return self.resolved.proposal.proposal_id
+
+    @property
+    def config(self) -> dict:
+        return json.loads(self._config_json)
+
+    @property
+    def environment_patch(self) -> Dict[str, str]:
+        return json.loads(self._environment_json)
+
+    @property
+    def config_digest(self) -> str:
+        return configuration_digest(self.config)
+
+    def to_dict(self) -> dict:
+        return {
+            "candidate_id": self.candidate_id,
+            "candidate_config_digest": self.config_digest,
+            "resolved_intervention": self.resolved.to_dict(),
+            "authorization": (
+                self.authorization.to_dict() if self.authorization else None
+            ),
+            "environment_patch": self.environment_patch,
+        }
+
+
+@dataclass(frozen=True)
+class CampaignTrial:
+    """Immutable campaign-level index for one isolated trial attempt."""
+
+    candidate_id: str
+    trial_id: str
+    run_id: str
+    phase: str
+    status: str
+    request_digest: str
+    execution_manifest_digest: str
+    duration_seconds: float
+    gpu_seconds: Optional[float]
+    progress_steps: Optional[int]
+    peak_vram_bytes: Optional[int]
+    workload_identity: WorkloadIdentity
+    worker_pid: Optional[int]
+    failure_class: Optional[str]
+    metrics: Dict[str, float]
+
+    def __post_init__(self) -> None:
+        for name in ("candidate_id", "trial_id", "run_id"):
+            _validate_id(getattr(self, name), name)
+        if self.phase not in TRIAL_PHASES:
+            raise CampaignError("campaign trial phase is invalid")
+        if self.status not in PARENT_EXECUTION_STATUSES:
+            raise CampaignError("campaign trial status is invalid")
+        _validate_digest(self.request_digest, "request_digest")
+        _validate_digest(
+            self.execution_manifest_digest,
+            "execution_manifest_digest",
+        )
+        object.__setattr__(
+            self,
+            "duration_seconds",
+            _nonnegative_finite(self.duration_seconds, "duration_seconds"),
+        )
+        if self.gpu_seconds is not None:
+            object.__setattr__(
+                self,
+                "gpu_seconds",
+                _nonnegative_finite(self.gpu_seconds, "gpu_seconds"),
+            )
+        if self.progress_steps is not None:
+            object.__setattr__(
+                self,
+                "progress_steps",
+                _nonnegative_int(self.progress_steps, "progress_steps"),
+            )
+        if self.peak_vram_bytes is not None:
+            object.__setattr__(
+                self,
+                "peak_vram_bytes",
+                _nonnegative_int(self.peak_vram_bytes, "peak_vram_bytes"),
+            )
+        if not isinstance(self.workload_identity, WorkloadIdentity):
+            raise CampaignError("workload_identity must be a WorkloadIdentity")
+        if self.worker_pid is not None:
+            object.__setattr__(
+                self,
+                "worker_pid",
+                _positive_int(self.worker_pid, "worker_pid"),
+            )
+        if self.failure_class is not None:
+            if not isinstance(self.failure_class, str) or not self.failure_class:
+                raise CampaignError("failure_class must be non-empty or null")
+        object.__setattr__(self, "metrics", MappingProxyType(_metrics(self.metrics)))
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "success" and self.failure_class is None
+
+    def to_dict(self) -> dict:
+        return {
+            "schema": {
+                "name": CAMPAIGN_TRIAL_SCHEMA_NAME,
+                "version": CAMPAIGN_TRIAL_SCHEMA_VERSION,
+            },
+            "candidate_id": self.candidate_id,
+            "trial_id": self.trial_id,
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "status": self.status,
+            "request_digest": self.request_digest,
+            "execution_manifest_digest": self.execution_manifest_digest,
+            "duration_seconds": self.duration_seconds,
+            "gpu_seconds": self.gpu_seconds,
+            "progress_steps": self.progress_steps,
+            "peak_vram_bytes": self.peak_vram_bytes,
+            "workload_identity": self.workload_identity.to_dict(),
+            "worker_pid": self.worker_pid,
+            "failure_class": self.failure_class,
+            "metrics": dict(self.metrics),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CampaignTrial":
+        _validate_schema(
+            payload,
+            CAMPAIGN_TRIAL_SCHEMA_NAME,
+            CAMPAIGN_TRIAL_SCHEMA_VERSION,
+            "campaign trial",
+        )
+        _reject_unknown_fields(
+            payload,
+            {
+                "schema",
+                "candidate_id",
+                "trial_id",
+                "run_id",
+                "phase",
+                "status",
+                "request_digest",
+                "execution_manifest_digest",
+                "duration_seconds",
+                "gpu_seconds",
+                "progress_steps",
+                "peak_vram_bytes",
+                "workload_identity",
+                "worker_pid",
+                "failure_class",
+                "metrics",
+            },
+            "campaign trial",
+        )
+        try:
+            return cls(
+                candidate_id=payload["candidate_id"],
+                trial_id=payload["trial_id"],
+                run_id=payload["run_id"],
+                phase=payload["phase"],
+                status=payload["status"],
+                request_digest=payload["request_digest"],
+                execution_manifest_digest=payload[
+                    "execution_manifest_digest"
+                ],
+                duration_seconds=payload["duration_seconds"],
+                gpu_seconds=payload["gpu_seconds"],
+                progress_steps=payload["progress_steps"],
+                peak_vram_bytes=payload["peak_vram_bytes"],
+                workload_identity=WorkloadIdentity.from_dict(
+                    payload["workload_identity"]
+                ),
+                worker_pid=payload["worker_pid"],
+                failure_class=payload["failure_class"],
+                metrics=payload["metrics"],
+            )
+        except KeyError as exc:
+            raise CampaignError(
+                "campaign trial is missing a required field"
+            ) from exc
+        except ValueError as exc:
+            if isinstance(exc, CampaignError):
+                raise
+            raise CampaignError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class CampaignBudgetUsage:
+    attempted_trials: int
+    probe_trials: int
+    full_trials: int
+    confirmation_trials: int
+    elapsed_seconds: float
+    observed_gpu_seconds: float
+    gpu_measurement_complete: bool
+
+    def __post_init__(self) -> None:
+        for name in (
+            "attempted_trials",
+            "probe_trials",
+            "full_trials",
+            "confirmation_trials",
+        ):
+            object.__setattr__(self, name, _nonnegative_int(getattr(self, name), name))
+        if self.attempted_trials != (
+            self.probe_trials + self.full_trials + self.confirmation_trials
+        ):
+            raise CampaignError("phase trial counts must equal attempted_trials")
+        object.__setattr__(
+            self,
+            "elapsed_seconds",
+            _nonnegative_finite(self.elapsed_seconds, "elapsed_seconds"),
+        )
+        object.__setattr__(
+            self,
+            "observed_gpu_seconds",
+            _nonnegative_finite(
+                self.observed_gpu_seconds,
+                "observed_gpu_seconds",
+            ),
+        )
+        if not isinstance(self.gpu_measurement_complete, bool):
+            raise CampaignError("gpu_measurement_complete must be a boolean")
+
+    def to_dict(self) -> dict:
+        return {
+            "attempted_trials": self.attempted_trials,
+            "probe_trials": self.probe_trials,
+            "full_trials": self.full_trials,
+            "confirmation_trials": self.confirmation_trials,
+            "elapsed_seconds": self.elapsed_seconds,
+            "observed_gpu_seconds": self.observed_gpu_seconds,
+            "gpu_measurement_complete": self.gpu_measurement_complete,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CampaignBudgetUsage":
+        if not isinstance(payload, dict):
+            raise CampaignError("budget usage must be an object")
+        _reject_unknown_fields(
+            payload,
+            {
+                "attempted_trials",
+                "probe_trials",
+                "full_trials",
+                "confirmation_trials",
+                "elapsed_seconds",
+                "observed_gpu_seconds",
+                "gpu_measurement_complete",
+            },
+            "budget usage",
+        )
+        try:
+            return cls(**payload)
+        except KeyError as exc:
+            raise CampaignError("budget usage is missing a required field") from exc
+
+
+@dataclass(frozen=True)
+class CampaignResult:
+    """Final campaign artifact.  ``verified`` is structurally guarded."""
+
+    campaign_id: str
+    contract_digest: str
+    status: str
+    stopped_reason: str
+    planned_candidate_ids: Tuple[str, ...]
+    probe_survivor_ids: Tuple[str, ...]
+    trials: Tuple[CampaignTrial, ...]
+    ranking: Optional[CandidateRanking]
+    verifications: Tuple[RecoveryVerification, ...]
+    verified_candidate_id: Optional[str]
+    verified_run_ids: Tuple[str, ...]
+    usage: CampaignBudgetUsage
+
+    def __post_init__(self) -> None:
+        _validate_id(self.campaign_id, "campaign_id")
+        _validate_digest(self.contract_digest, "contract_digest")
+        if self.status not in CAMPAIGN_STATUSES:
+            raise CampaignError("campaign status is invalid")
+        if (
+            not isinstance(self.stopped_reason, str)
+            or not _REASON_PATTERN.fullmatch(self.stopped_reason)
+        ):
+            raise CampaignError("stopped_reason must be a machine-readable code")
+
+        for name in ("planned_candidate_ids", "probe_survivor_ids"):
+            try:
+                values = tuple(getattr(self, name))
+            except TypeError as exc:
+                raise CampaignError("{} must be iterable".format(name)) from exc
+            for value in values:
+                _validate_id(value, name)
+            if len(values) != len(set(values)):
+                raise CampaignError("{} must contain unique ids".format(name))
+            object.__setattr__(self, name, values)
+        if not set(self.probe_survivor_ids).issubset(self.planned_candidate_ids):
+            raise CampaignError("probe survivors must be planned candidates")
+
+        trials = tuple(self.trials)
+        if any(not isinstance(item, CampaignTrial) for item in trials):
+            raise CampaignError("trials must contain CampaignTrial values")
+        if len({item.trial_id for item in trials}) != len(trials):
+            raise CampaignError("campaign trial ids must be unique")
+        if len({item.run_id for item in trials}) != len(trials):
+            raise CampaignError("campaign run ids must be unique")
+        if len({item.request_digest for item in trials}) != len(trials):
+            raise CampaignError("campaign request digests must be unique")
+        if len({item.execution_manifest_digest for item in trials}) != len(trials):
+            raise CampaignError("campaign execution digests must be unique")
+        if any(item.candidate_id not in self.planned_candidate_ids for item in trials):
+            raise CampaignError("campaign trial references an unknown candidate")
+        object.__setattr__(self, "trials", trials)
+
+        if self.ranking is not None:
+            if not isinstance(self.ranking, CandidateRanking):
+                raise CampaignError("ranking must be a CandidateRanking or None")
+            if self.ranking.campaign_id != self.campaign_id:
+                raise CampaignError("ranking belongs to another campaign")
+            if self.ranking.contract_digest != self.contract_digest:
+                raise CampaignError("ranking belongs to another contract")
+            if not set(self.ranking.confirmation_order).issubset(
+                self.planned_candidate_ids
+            ):
+                raise CampaignError("ranking references an unknown candidate")
+
+        reports = tuple(self.verifications)
+        if any(not isinstance(item, RecoveryVerification) for item in reports):
+            raise CampaignError(
+                "verifications must contain RecoveryVerification values"
+            )
+        if any(
+            item.campaign_id != self.campaign_id
+            or item.contract_digest != self.contract_digest
+            for item in reports
+        ):
+            raise CampaignError("verification belongs to another campaign")
+        if any(item.candidate_id not in self.planned_candidate_ids for item in reports):
+            raise CampaignError("verification references an unknown candidate")
+        report_ids = [item.candidate_id for item in reports]
+        if len(report_ids) != len(set(report_ids)):
+            raise CampaignError("each candidate may have one verification report")
+        object.__setattr__(self, "verifications", reports)
+        confirmation_runs = {
+            (item.candidate_id, item.run_id)
+            for item in trials
+            if item.phase == "confirmation"
+        }
+        for report in reports:
+            if any(
+                (report.candidate_id, run_id) not in confirmation_runs
+                for run_id in report.confirmation_run_ids
+            ):
+                raise CampaignError(
+                    "verification references an unrecorded confirmation run"
+                )
+
+        run_ids = tuple(self.verified_run_ids)
+        for run_id in run_ids:
+            _validate_id(run_id, "verified run_id")
+        object.__setattr__(self, "verified_run_ids", run_ids)
+        verified_reports = [item for item in reports if item.verified]
+        if self.status == "verified":
+            if len(verified_reports) != 1:
+                raise CampaignError(
+                    "verified status requires exactly one verified report"
+                )
+            report = verified_reports[0]
+            if self.verified_candidate_id != report.candidate_id:
+                raise CampaignError(
+                    "verified_candidate_id must match the verifier report"
+                )
+            if run_ids != report.confirmation_run_ids:
+                raise CampaignError(
+                    "verified_run_ids must match verifier confirmations"
+                )
+            if self.stopped_reason != "verified_recovery":
+                raise CampaignError(
+                    "verified campaigns must stop for verified_recovery"
+                )
+        else:
+            if verified_reports:
+                raise CampaignError(
+                    "a verified report cannot be hidden by another status"
+                )
+            if self.verified_candidate_id is not None or run_ids:
+                raise CampaignError(
+                    "non-verified campaigns cannot expose verified recovery ids"
+                )
+            if self.stopped_reason == "verified_recovery":
+                raise CampaignError(
+                    "verified_recovery reason requires verified status"
+                )
+        if not isinstance(self.usage, CampaignBudgetUsage):
+            raise CampaignError("usage must be CampaignBudgetUsage")
+        if self.usage.attempted_trials < len(trials):
+            raise CampaignError("usage cannot record fewer attempts than trials")
+
+    @property
+    def verified(self) -> bool:
+        return self.status == "verified"
+
+    def to_dict(self) -> dict:
+        return {
+            "schema": {
+                "name": CAMPAIGN_RESULT_SCHEMA_NAME,
+                "version": CAMPAIGN_RESULT_SCHEMA_VERSION,
+            },
+            "campaign_id": self.campaign_id,
+            "contract_digest": self.contract_digest,
+            "status": self.status,
+            "stopped_reason": self.stopped_reason,
+            "planned_candidate_ids": list(self.planned_candidate_ids),
+            "probe_survivor_ids": list(self.probe_survivor_ids),
+            "trials": [item.to_dict() for item in self.trials],
+            "ranking": self.ranking.to_dict() if self.ranking else None,
+            "verifications": [item.to_dict() for item in self.verifications],
+            "verified": self.verified,
+            "verified_candidate_id": self.verified_candidate_id,
+            "verified_run_ids": list(self.verified_run_ids),
+            "usage": self.usage.to_dict(),
+            "invariants": {
+                "deterministic_policy_inputs_only": True,
+                "fresh_process_trials": True,
+                "ranking_is_provisional": True,
+                "verifier_is_only_recovery_authority": True,
+            },
+        }
+
+    def to_json(self) -> str:
+        return _stable_json(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CampaignResult":
+        _validate_schema(
+            payload,
+            CAMPAIGN_RESULT_SCHEMA_NAME,
+            CAMPAIGN_RESULT_SCHEMA_VERSION,
+            "campaign result",
+        )
+        _reject_unknown_fields(
+            payload,
+            {
+                "schema",
+                "campaign_id",
+                "contract_digest",
+                "status",
+                "stopped_reason",
+                "planned_candidate_ids",
+                "probe_survivor_ids",
+                "trials",
+                "ranking",
+                "verifications",
+                "verified",
+                "verified_candidate_id",
+                "verified_run_ids",
+                "usage",
+                "invariants",
+            },
+            "campaign result",
+        )
+        expected_invariants = {
+            "deterministic_policy_inputs_only": True,
+            "fresh_process_trials": True,
+            "ranking_is_provisional": True,
+            "verifier_is_only_recovery_authority": True,
+        }
+        if payload.get("invariants") != expected_invariants:
+            raise CampaignError("campaign invariants cannot be changed")
+        try:
+            trials = payload["trials"]
+            reports = payload["verifications"]
+            planned = payload["planned_candidate_ids"]
+            survivors = payload["probe_survivor_ids"]
+            verified_ids = payload["verified_run_ids"]
+            if not all(
+                isinstance(item, list)
+                for item in (trials, reports, planned, survivors, verified_ids)
+            ):
+                raise CampaignError("campaign result collections must be arrays")
+            ranking_payload = payload["ranking"]
+            result = cls(
+                campaign_id=payload["campaign_id"],
+                contract_digest=payload["contract_digest"],
+                status=payload["status"],
+                stopped_reason=payload["stopped_reason"],
+                planned_candidate_ids=tuple(planned),
+                probe_survivor_ids=tuple(survivors),
+                trials=tuple(CampaignTrial.from_dict(item) for item in trials),
+                ranking=(
+                    CandidateRanking.from_dict(ranking_payload)
+                    if ranking_payload is not None
+                    else None
+                ),
+                verifications=tuple(
+                    RecoveryVerification.from_dict(item) for item in reports
+                ),
+                verified_candidate_id=payload["verified_candidate_id"],
+                verified_run_ids=tuple(verified_ids),
+                usage=CampaignBudgetUsage.from_dict(payload["usage"]),
+            )
+        except KeyError as exc:
+            raise CampaignError(
+                "campaign result is missing a required field"
+            ) from exc
+        if payload["verified"] is not result.verified:
+            raise CampaignError("verified flag is inconsistent with status")
+        return result
+
+    @classmethod
+    def from_json(cls, encoded: str) -> "CampaignResult":
+        try:
+            payload = json.loads(encoded)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CampaignError("invalid campaign result JSON") from exc
+        return cls.from_dict(payload)
+
+
+@dataclass
+class _BudgetLedger:
+    contract: RecoveryContract
+    clock: Callable[[], float]
+    started_at: float
+    attempted: int = 0
+    probe: int = 0
+    full: int = 0
+    confirmation: int = 0
+    observed_gpu_seconds: float = 0.0
+    gpu_measurement_complete: bool = True
+    accounted_trial_seconds: float = 0.0
+
+    def elapsed(self) -> float:
+        measured = float(self.clock()) - self.started_at
+        if not math.isfinite(measured):
+            raise CampaignError("campaign clock returned a non-finite value")
+        return max(0.0, measured, self.accounted_trial_seconds)
+
+    def remaining_trials(self) -> int:
+        return self.contract.budget.max_trials - self.attempted
+
+    def reason_before(self, phase: str, *, reserve: int = 1) -> Optional[str]:
+        if self.elapsed() >= self.contract.budget.campaign_timeout_seconds:
+            return "campaign_timeout"
+        if self.remaining_trials() < reserve:
+            return "trial_budget_exhausted"
+        if phase == "probe" and self.probe >= self.contract.budget.max_probe_trials:
+            return "probe_budget_exhausted"
+        if phase == "full" and self.full >= self.contract.budget.max_full_trials:
+            return "full_budget_exhausted"
+        maximum_gpu = self.contract.budget.max_gpu_seconds
+        if maximum_gpu is not None:
+            if not self.gpu_measurement_complete:
+                return "gpu_budget_evidence_missing"
+            if self.observed_gpu_seconds >= maximum_gpu:
+                return "gpu_budget_exhausted"
+        return None
+
+    def timeout_for_next(self) -> float:
+        remaining_wall = (
+            self.contract.budget.campaign_timeout_seconds - self.elapsed()
+        )
+        timeout = min(
+            self.contract.budget.trial_timeout_seconds,
+            remaining_wall,
+        )
+        maximum_gpu = self.contract.budget.max_gpu_seconds
+        if maximum_gpu is not None:
+            timeout = min(timeout, maximum_gpu - self.observed_gpu_seconds)
+        if timeout <= 0 or not math.isfinite(timeout):
+            raise CampaignError("no positive trial timeout remains")
+        return timeout
+
+    def reserve(self, phase: str) -> None:
+        self.attempted += 1
+        setattr(self, phase, getattr(self, phase) + 1)
+
+    def record(self, trial: CampaignTrial) -> None:
+        self.accounted_trial_seconds += trial.duration_seconds
+        if trial.gpu_seconds is None:
+            self.gpu_measurement_complete = False
+        else:
+            self.observed_gpu_seconds += trial.gpu_seconds
+
+    def usage(self) -> CampaignBudgetUsage:
+        return CampaignBudgetUsage(
+            attempted_trials=self.attempted,
+            probe_trials=self.probe,
+            full_trials=self.full,
+            confirmation_trials=self.confirmation,
+            elapsed_seconds=self.elapsed(),
+            observed_gpu_seconds=self.observed_gpu_seconds,
+            gpu_measurement_complete=self.gpu_measurement_complete,
+        )
+
+
+def run_campaign(
+    contract: RecoveryContract,
+    *,
+    campaign_id: str,
+    candidates: Iterable[CampaignCandidate],
+    ranking_policy: RankingPolicy,
+    executor: CampaignExecutor,
+    clock: Callable[[], float] = time.monotonic,
+) -> CampaignResult:
+    """Execute one bounded deterministic OOM recovery campaign.
+
+    Candidate order must be the deterministic order emitted by the OOM policy.
+    Probes preserve that order.  Full trials are ranked only after they finish.
+    Each eligible candidate then receives the complete predeclared number of
+    fresh confirmations or none; the orchestrator never cherry-picks a subset.
+    """
+    if not isinstance(contract, RecoveryContract):
+        raise CampaignError("contract must be a RecoveryContract")
+    _validate_id(campaign_id, "campaign_id")
+    if not isinstance(ranking_policy, RankingPolicy):
+        raise CampaignError("ranking_policy must be a RankingPolicy")
+    ranking_policy.validate_against(contract)
+    if not callable(executor):
+        raise CampaignError("executor must be callable")
+    if not callable(clock):
+        raise CampaignError("clock must be callable")
+    try:
+        candidate_items = tuple(candidates)
+    except TypeError as exc:
+        raise CampaignError("candidates must be iterable") from exc
+    if any(not isinstance(item, CampaignCandidate) for item in candidate_items):
+        raise CampaignError("candidates must contain CampaignCandidate values")
+    candidate_ids = tuple(item.candidate_id for item in candidate_items)
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise CampaignError("candidate ids must be unique")
+    config_digests = tuple(item.config_digest for item in candidate_items)
+    if len(config_digests) != len(set(config_digests)):
+        raise CampaignError(
+            "candidates must produce unique configurations"
+        )
+    for candidate in candidate_items:
+        validate_intervention_scope(contract, candidate.resolved)
+        _validate_candidate_application(contract, candidate)
+
+    started_at = float(clock())
+    if not math.isfinite(started_at):
+        raise CampaignError("campaign clock returned a non-finite value")
+    ledger = _BudgetLedger(contract, clock, started_at)
+    digest = contract_digest(contract)
+    trials = []
+    survivors = []
+    full_evidence = {}
+    verification_reports = []
+
+    def finish(
+        status: str,
+        reason: str,
+        *,
+        ranking: Optional[CandidateRanking] = None,
+        verified_report: Optional[RecoveryVerification] = None,
+    ) -> CampaignResult:
+        return CampaignResult(
+            campaign_id=campaign_id,
+            contract_digest=digest,
+            status=status,
+            stopped_reason=reason,
+            planned_candidate_ids=candidate_ids,
+            probe_survivor_ids=tuple(item.candidate_id for item in survivors),
+            trials=tuple(trials),
+            ranking=ranking,
+            verifications=tuple(verification_reports),
+            verified_candidate_id=(
+                verified_report.candidate_id if verified_report else None
+            ),
+            verified_run_ids=(
+                verified_report.confirmation_run_ids
+                if verified_report
+                else tuple()
+            ),
+            usage=ledger.usage(),
+        )
+
+    if not candidate_items:
+        return finish("not_recovered", "no_candidates")
+
+    # Probe: bounded survivability only. Probe metrics are never ranked.
+    for candidate in candidate_items[: contract.budget.max_probe_trials]:
+        reason = ledger.reason_before("probe")
+        if reason is not None:
+            return finish("stopped", reason)
+        launched = _launch_trial(
+            contract,
+            campaign_id,
+            candidate,
+            phase="probe",
+            phase_ordinal=ledger.probe + 1,
+            executor=executor,
+            ledger=ledger,
+        )
+        if isinstance(launched, str):
+            return finish("stopped", launched)
+        trials.append(launched)
+        if launched.succeeded:
+            survivors.append(candidate)
+        budget_reason = ledger.reason_before("probe")
+        if budget_reason in {
+            "campaign_timeout",
+            "gpu_budget_exhausted",
+            "gpu_budget_evidence_missing",
+        }:
+            return finish("stopped", budget_reason)
+
+    if not survivors:
+        return finish("not_recovered", "no_probe_survivors")
+
+    # Full: one independently inspectable run per surviving candidate.
+    for candidate in survivors[: contract.budget.max_full_trials]:
+        reason = ledger.reason_before("full")
+        if reason is not None:
+            return finish("stopped", reason)
+        launched = _launch_trial(
+            contract,
+            campaign_id,
+            candidate,
+            phase="full",
+            phase_ordinal=ledger.full + 1,
+            executor=executor,
+            ledger=ledger,
+        )
+        if isinstance(launched, str):
+            return finish("stopped", launched)
+        trials.append(launched)
+        full_evidence[candidate.candidate_id] = launched
+        budget_reason = ledger.reason_before("full")
+        if budget_reason in {
+            "campaign_timeout",
+            "gpu_budget_exhausted",
+            "gpu_budget_evidence_missing",
+        }:
+            return finish("stopped", budget_reason)
+
+    ranking_candidates = tuple(
+        _ranking_candidate(
+            contract,
+            campaign_id,
+            next(item for item in survivors if item.candidate_id == candidate_id),
+            trial,
+        )
+        for candidate_id, trial in full_evidence.items()
+    )
+    ranking = rank_candidates(
+        contract,
+        campaign_id=campaign_id,
+        policy=ranking_policy,
+        candidates=ranking_candidates,
+    )
+    if not ranking.confirmation_order:
+        return finish(
+            "not_recovered",
+            "no_eligible_full_trials",
+            ranking=ranking,
+        )
+
+    by_id = {item.candidate_id: item for item in candidate_items}
+    required_confirmations = contract.verification.confirmation_runs
+    for candidate_id in ranking.confirmation_order:
+        reason = ledger.reason_before(
+            "confirmation",
+            reserve=required_confirmations,
+        )
+        if reason is not None:
+            if reason == "trial_budget_exhausted":
+                reason = "confirmation_budget_exhausted"
+            return finish("stopped", reason, ranking=ranking)
+
+        candidate = by_id[candidate_id]
+        confirmation_evidence = []
+        for _ in range(required_confirmations):
+            reason = ledger.reason_before("confirmation")
+            if reason is not None:
+                return finish("stopped", reason, ranking=ranking)
+            launched = _launch_trial(
+                contract,
+                campaign_id,
+                candidate,
+                phase="confirmation",
+                phase_ordinal=ledger.confirmation + 1,
+                executor=executor,
+                ledger=ledger,
+            )
+            if isinstance(launched, str):
+                return finish("stopped", launched, ranking=ranking)
+            trials.append(launched)
+            confirmation_evidence.append(
+                _confirmation_evidence(
+                    contract,
+                    campaign_id,
+                    candidate,
+                    launched,
+                )
+            )
+            budget_reason = ledger.reason_before("confirmation")
+            if budget_reason in {
+                "campaign_timeout",
+                "gpu_budget_exhausted",
+                "gpu_budget_evidence_missing",
+            }:
+                return finish("stopped", budget_reason, ranking=ranking)
+
+        report = verify_recovery(
+            contract,
+            campaign_id=campaign_id,
+            candidate_id=candidate.candidate_id,
+            candidate_config=candidate.config,
+            confirmations=tuple(confirmation_evidence),
+        )
+        verification_reports.append(report)
+        if report.verified:
+            return finish(
+                "verified",
+                "verified_recovery",
+                ranking=ranking,
+                verified_report=report,
+            )
+
+    return finish(
+        "not_recovered",
+        "all_ranked_candidates_rejected",
+        ranking=ranking,
+    )
+
+
+def campaign_result_digest(result: CampaignResult) -> str:
+    """Return the stable identity of a complete campaign artifact."""
+    if not isinstance(result, CampaignResult):
+        raise CampaignError("result must be a CampaignResult")
+    return hashlib.sha256(result.to_json().encode("utf-8")).hexdigest()
+
+
+def _launch_trial(
+    contract: RecoveryContract,
+    campaign_id: str,
+    candidate: CampaignCandidate,
+    *,
+    phase: str,
+    phase_ordinal: int,
+    executor: CampaignExecutor,
+    ledger: _BudgetLedger,
+):
+    token = _trial_token(
+        campaign_id,
+        candidate.candidate_id,
+        phase,
+        phase_ordinal,
+    )
+    request = TrialRequest(
+        trial_id="trial-{}".format(token),
+        run_id="run-{}".format(token),
+        campaign_id=campaign_id,
+        source_run_id=contract.source_run_id,
+        project=contract.project,
+        phase=phase,
+        entrypoint=contract.entrypoint,
+        config=candidate.config,
+        max_steps=(contract.budget.probe_steps if phase == "probe" else None),
+        environment_patch=candidate.environment_patch,
+    )
+    try:
+        timeout = ledger.timeout_for_next()
+    except CampaignError:
+        return "campaign_timeout"
+    ledger.reserve(phase)
+    try:
+        returned = executor(request, timeout)
+    except Exception:
+        return "trial_executor_error"
+    if not isinstance(returned, ExecutedTrial):
+        return "trial_evidence_mismatch"
+    try:
+        trial = _normalize_trial(candidate.candidate_id, request, returned)
+    except CampaignError:
+        return "trial_evidence_mismatch"
+    ledger.record(trial)
+    return trial
+
+
+def _normalize_trial(
+    candidate_id: str,
+    request: TrialRequest,
+    returned: ExecutedTrial,
+) -> CampaignTrial:
+    execution = returned.execution
+    observation = returned.observation
+    bindings = (
+        ("trial_id", execution.trial_id, request.trial_id),
+        ("run_id", execution.run_id, request.run_id),
+        ("project", execution.project, request.project),
+        ("phase", execution.phase, request.phase),
+    )
+    for name, observed, expected in bindings:
+        if observed != expected:
+            raise CampaignError("execution {} does not match request".format(name))
+    result = execution.result
+    metrics = {}
+    worker_pid = execution.child_pid
+    failure_class = None
+    if execution.status in {
+        "success",
+        "training_failed",
+        "contract_error",
+        "worker_error",
+    } and result is None:
+        raise CampaignError(
+            "worker execution status requires an authenticated worker result"
+        )
+    if result is not None:
+        result_bindings = (
+            ("trial_id", result.trial_id, request.trial_id),
+            ("run_id", result.run_id, request.run_id),
+            ("project", result.project, request.project),
+            ("phase", result.phase, request.phase),
+            ("campaign_id", result.campaign_id, request.campaign_id),
+            ("source_run_id", result.source_run_id, request.source_run_id),
+            ("status", result.status, execution.status),
+        )
+        for name, observed, expected in result_bindings:
+            if observed != expected:
+                raise CampaignError(
+                    "worker result {} does not match request/execution".format(name)
+                )
+        metrics = result.metrics
+        worker_pid = result.worker_pid
+        failure_class = result.failure_class
+        if execution.child_pid is not None and result.worker_pid != execution.child_pid:
+            raise CampaignError("worker_pid does not match the launched child")
+    return CampaignTrial(
+        candidate_id=candidate_id,
+        trial_id=request.trial_id,
+        run_id=request.run_id,
+        phase=request.phase,
+        status=execution.status,
+        request_digest=_digest(request.to_dict()),
+        execution_manifest_digest=_digest(execution.to_dict()),
+        duration_seconds=execution.duration_seconds,
+        gpu_seconds=observation.gpu_seconds,
+        progress_steps=observation.progress_steps,
+        peak_vram_bytes=observation.peak_vram_bytes,
+        workload_identity=observation.workload_identity,
+        worker_pid=worker_pid,
+        failure_class=failure_class,
+        metrics=metrics,
+    )
+
+
+def _ranking_candidate(
+    contract: RecoveryContract,
+    campaign_id: str,
+    candidate: CampaignCandidate,
+    trial: CampaignTrial,
+) -> RankingCandidate:
+    return RankingCandidate(
+        campaign_id=campaign_id,
+        candidate_id=candidate.candidate_id,
+        trial_id=trial.trial_id,
+        run_id=trial.run_id,
+        project=contract.project,
+        source_run_id=contract.source_run_id,
+        contract_digest=contract_digest(contract),
+        candidate_config_digest=candidate.config_digest,
+        trial_request_digest=trial.request_digest,
+        execution_manifest_digest=trial.execution_manifest_digest,
+        phase=trial.phase,
+        status=trial.status,
+        metrics=dict(trial.metrics),
+        progress_steps=trial.progress_steps,
+        peak_vram_bytes=trial.peak_vram_bytes,
+        workload_identity=trial.workload_identity,
+        worker_pid=trial.worker_pid,
+        failure_class=trial.failure_class,
+        intervention_risk=candidate.resolved.maximum_risk,
+        approval_required=candidate.resolved.approval_required,
+        semantic_change=candidate.resolved.semantic_change,
+        change_count=len(candidate.resolved.changes),
+    )
+
+
+def _confirmation_evidence(
+    contract: RecoveryContract,
+    campaign_id: str,
+    candidate: CampaignCandidate,
+    trial: CampaignTrial,
+) -> ConfirmationEvidence:
+    return ConfirmationEvidence(
+        campaign_id=campaign_id,
+        candidate_id=candidate.candidate_id,
+        trial_id=trial.trial_id,
+        run_id=trial.run_id,
+        project=contract.project,
+        source_run_id=contract.source_run_id,
+        contract_digest=contract_digest(contract),
+        candidate_config_digest=candidate.config_digest,
+        trial_request_digest=trial.request_digest,
+        execution_manifest_digest=trial.execution_manifest_digest,
+        phase=trial.phase,
+        status=trial.status,
+        metrics=dict(trial.metrics),
+        progress_steps=trial.progress_steps,
+        peak_vram_bytes=trial.peak_vram_bytes,
+        workload_identity=trial.workload_identity,
+        worker_pid=trial.worker_pid,
+        failure_class=trial.failure_class,
+    )
+
+
+def _validate_candidate_application(
+    contract: RecoveryContract,
+    candidate: CampaignCandidate,
+) -> None:
+    """Reconstruct the expected config patch from sealed contract inputs."""
+    expected = contract.source_config
+    for change in candidate.resolved.changes:
+        if change.location == "config":
+            observed_before = _get_dotted(expected, change.target)
+            if observed_before != change.before:
+                raise CampaignError(
+                    "candidate baseline no longer matches the recovery contract"
+                )
+            _set_dotted(expected, change.target, change.after)
+    if _stable_json(expected) != _stable_json(candidate.config):
+        raise CampaignError(
+            "candidate config contains changes outside its resolved intervention"
+        )
+    if candidate.environment_patch != candidate.resolved.environment_patch:
+        raise CampaignError(
+            "candidate environment patch does not match its intervention"
+        )
+
+
+def _validate_authorization_binding(
+    resolved: ResolvedIntervention,
+    authorization: Optional[InterventionAuthorization],
+) -> None:
+    if resolved.approval_required and authorization is None:
+        raise CampaignError("approval-required candidate lacks authorization")
+    if authorization is not None:
+        if authorization.proposal_id != resolved.proposal.proposal_id:
+            raise CampaignError("authorization belongs to another proposal")
+        if authorization.proposal_digest != proposal_digest(resolved.proposal):
+            raise CampaignError("authorization digest does not match proposal")
+
+
+def _get_dotted(config: dict, path: str):
+    current = config
+    parts = path.split(".")
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            raise CampaignError("config target {!r} is missing".format(path))
+        current = current[part]
+    return current
+
+
+def _set_dotted(config: dict, path: str, value) -> None:
+    current = config
+    parts = path.split(".")
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            raise CampaignError("config target {!r} is missing".format(path))
+        current = current[part]
+    if not isinstance(current, dict) or parts[-1] not in current:
+        raise CampaignError("config target {!r} is missing".format(path))
+    current[parts[-1]] = value
+
+
+def _trial_token(
+    campaign_id: str,
+    candidate_id: str,
+    phase: str,
+    ordinal: int,
+) -> str:
+    material = "{}\0{}\0{}\0{}".format(
+        campaign_id,
+        candidate_id,
+        phase,
+        ordinal,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def _digest(payload: dict) -> str:
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+
+
+def _stable_json(payload) -> str:
+    try:
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CampaignError("value is not stable JSON") from exc
+
+
+def _metrics(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise CampaignError("metrics must be an object")
+    normalized = {}
+    for name, value in payload.items():
+        if not isinstance(name, str) or not name:
+            raise CampaignError("metric names must be non-empty strings")
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise CampaignError("metric values must be finite numbers")
+        number = float(value)
+        if not math.isfinite(number):
+            raise CampaignError("metric values must be finite numbers")
+        normalized[name] = number
+    return normalized
+
+
+def _validate_id(value, name: str) -> None:
+    if not isinstance(value, str) or not _ID_PATTERN.fullmatch(value):
+        raise CampaignError("{} is invalid".format(name))
+
+
+def _validate_digest(value, name: str) -> None:
+    if not isinstance(value, str) or not _SHA256_PATTERN.fullmatch(value):
+        raise CampaignError("{} must be a lowercase SHA-256 digest".format(name))
+
+
+def _positive_int(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise CampaignError("{} must be a positive integer".format(name))
+    return value
+
+
+def _nonnegative_int(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise CampaignError("{} must be a non-negative integer".format(name))
+    return value
+
+
+def _nonnegative_finite(value, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise CampaignError("{} must be a finite non-negative number".format(name))
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise CampaignError("{} must be a finite non-negative number".format(name))
+    return number
+
+
+def _validate_schema(
+    payload: dict,
+    name: str,
+    version: str,
+    artifact: str,
+) -> None:
+    if not isinstance(payload, dict):
+        raise CampaignError("{} must be an object".format(artifact))
+    schema = payload.get("schema")
+    if not isinstance(schema, dict):
+        raise CampaignError("{} schema must be an object".format(artifact))
+    _reject_unknown_fields(schema, {"name", "version"}, "schema")
+    if schema.get("name") != name or schema.get("version") != version:
+        raise CampaignError("{} schema is unsupported".format(artifact))
+
+
+def _reject_unknown_fields(payload: dict, allowed: set, artifact: str) -> None:
+    if not isinstance(payload, dict):
+        raise CampaignError("{} must be an object".format(artifact))
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise CampaignError(
+            "{} contains unknown fields: {}".format(artifact, unknown)
+        )

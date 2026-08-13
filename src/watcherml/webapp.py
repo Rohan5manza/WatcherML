@@ -1,65 +1,119 @@
-"""Local web UI backend. Serves the WatcherML app (Overview, Projects, Runs,
-Failures, Campaigns, Memory, Settings) and a JSON API reading from the same
-SQLite storage the CLI uses. No Postgres, no Docker -- this is local mode.
+"""Read-only local web API for WatcherML v1 evidence and audit trails.
 
-Started via `watcher ui`.
+The browser surface reads the same SQLite database as the SDK and CLI.  It can
+label runs and export evidence, but it never launches GPU work, authorizes an
+intervention, promotes a recovery, or mutates verifier-backed campaign data.
+Recovery execution stays in the explicit Python/CLI workflow.
 """
 from __future__ import annotations
 
+import contextlib
+import csv
+import hashlib
+import io
 import json
 import os
 import tempfile
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from . import collectors
-from .capsule import build_evidence_index, compare_to_last_success, find_similar_failures
+from .capsule import (
+    build_evidence_index,
+    compare_to_last_success,
+    find_similar_failures,
+)
 from .diff import compare_runs
 from .export import export_capsule
-from .storage import Storage
+from .storage import RECOVERY_RESULT_FILENAME, Storage
 
+
+API_VERSION = "1.0"
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "webstatic")
 
 
-def _safe_json(s, default=None):
-    if not s:
+class RunUpdate(BaseModel):
+    """Human labels only; recovery truth is not editable from the UI."""
+
+    display_name: Optional[str] = Field(default=None, max_length=256)
+    tags: Optional[list[str]] = None
+    # Accepted only to return a clear compatibility error to older frontends.
+    resolved: Optional[bool] = None
+    resolved_note: Optional[str] = None
+
+
+def _safe_json(value, default=None):
+    if value is None or value == "":
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _row_get(row, name: str, default=None):
+    if row is None:
         return default
     try:
-        return json.loads(s)
-    except Exception:
+        return row[name]
+    except (IndexError, KeyError):
         return default
 
 
-def _gpu_name(gpu_json) -> Optional[str]:
-    gpu_info = _safe_json(gpu_json, {}) or {}
-    gpus = gpu_info.get("gpus") or []
-    return gpus[0]["name"] if gpus else None
+def _gpu_name(gpu_value) -> Optional[str]:
+    gpu = _safe_json(gpu_value, {}) or {}
+    devices = gpu.get("gpus") or []
+    if not devices:
+        return None
+    return devices[0].get("name")
 
 
 def _display_name(row) -> str:
-    """Human-readable name: explicit user-set name, else a heuristic built
-    from config (e.g. 'resnet50 -- batch 32'), else just the run_id."""
-    if row["display_name"]:
-        return row["display_name"]
+    explicit = _row_get(row, "display_name")
+    if explicit:
+        return explicit
     config = _safe_json(row["config_json"], {}) or {}
-    model = config.get("model") or config.get("architecture") or config.get("model_name")
-    batch = config.get("batch_size")
-    if model and batch:
-        return f"{model} \u2014 batch {batch}"
-    if model:
-        return str(model)
-    return row["run_id"]
+    model = (
+        config.get("model")
+        or config.get("architecture")
+        or config.get("model_name")
+        or _nested(config, "model.name")
+    )
+    batch = config.get("batch_size") or _nested(
+        config, "trainer.per_device_train_batch_size"
+    )
+    if model and batch is not None:
+        return "{} — batch {}".format(model, batch)
+    return str(model) if model else row["run_id"]
 
 
-def _row_to_run_summary(storage: Storage, row) -> dict:
-    diagnosis = None
-    failure = storage.get_failure(row["run_id"]) if row["exit_status"] == "failed" else None
-    if failure:
-        diagnosis = (_safe_json(failure["diagnosis_json"], {}) or {}).get("rule")
+def _nested(payload: dict, dotted: str):
+    current = payload
+    for part in dotted.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _failure_class(storage: Storage, run_id: str) -> Optional[str]:
+    failure = storage.get_failure(run_id)
+    if failure is None:
+        return None
+    return _row_get(failure, "failure_class") or (
+        _safe_json(failure["diagnosis_json"], {}) or {}
+    ).get("rule")
+
+
+def _run_summary(storage: Storage, row) -> dict:
     config = _safe_json(row["config_json"], {}) or {}
     return {
         "run_id": row["run_id"],
@@ -67,350 +121,656 @@ def _row_to_run_summary(storage: Storage, row) -> dict:
         "project": row["project"],
         "status": row["exit_status"],
         "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
         "duration_seconds": row["duration_seconds"],
-        "reproduction_score": row["reproduction_score"],
+        "capture_completeness": _row_get(row, "capture_completeness"),
+        # Kept as historical run metadata, never used as recovery proof.
+        "reproduction_score": _row_get(row, "reproduction_score"),
         "config": config,
         "final_metrics": storage.final_metrics(row["run_id"]),
         "git_dirty": (_safe_json(row["git_json"], {}) or {}).get("dirty"),
         "hardware": _gpu_name(row["gpu_json"]) or "CPU only",
         "warning_count": len(_safe_json(row["warnings_json"], []) or []),
-        "failure_category": diagnosis,
-        "tags": _safe_json(row["tags_json"], []) or [],
-        "resolved": bool(row["resolved"]) if row["resolved"] is not None else False,
+        "failure_category": _failure_class(storage, row["run_id"]),
+        "tags": _safe_json(_row_get(row, "tags_json"), []) or [],
+        "resolved": bool(_row_get(row, "resolved", 0)),
+        "resolved_note": _row_get(row, "resolved_note"),
         "simulated": bool(config.get("_simulated")),
     }
 
 
-class RunUpdate(BaseModel):
-    display_name: Optional[str] = None
-    tags: Optional[list] = None
-    resolved: Optional[bool] = None
-    resolved_note: Optional[str] = None
+def _campaign_summary(storage: Storage, row) -> dict:
+    usage = _safe_json(_row_get(row, "usage_json"), {}) or {}
+    verified = bool(_row_get(row, "verified", 0))
+    status = _row_get(row, "status", "running") or "running"
+    if verified:
+        verification_status = "verified"
+    elif row["ended_at"] is None or status == "running":
+        verification_status = "pending"
+    else:
+        verification_status = "not_verified"
+    return {
+        "campaign_id": row["campaign_id"],
+        "project": row["project"],
+        "source_run_id": row["source_run_id"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+        "status": status,
+        "stopped_reason": row["stopped_reason"],
+        "verified": verified,
+        "verification_status": verification_status,
+        "verified_candidate_id": _row_get(row, "verified_candidate_id"),
+        "verified_run_ids": _safe_json(
+            _row_get(row, "verified_run_ids_json"), []
+        )
+        or [],
+        "trial_count": int(usage.get("attempted_trials", 0)),
+        "phase_counts": {
+            "probe": int(usage.get("probe_trials", 0)),
+            "full": int(usage.get("full_trials", 0)),
+            "confirmation": int(usage.get("confirmation_trials", 0)),
+        },
+        "artifact_available": bool(_row_get(row, "artifact_path")),
+    }
+
+
+def _trial_payload(storage: Storage, row) -> dict:
+    run = storage.get_run(row["run_id"])
+    metrics = _safe_json(_row_get(row, "metrics_json"), {}) or {}
+    if not metrics and run is not None:
+        metrics = storage.final_metrics(row["run_id"])
+    resource = (
+        _safe_json(run["resource_json"], {}) if run is not None else {}
+    ) or {}
+    peak_bytes = _row_get(row, "peak_vram_bytes")
+    if peak_bytes is None and resource.get("vram_used_mib_peak") is not None:
+        peak_bytes = int(float(resource["vram_used_mib_peak"]) * 1024**2)
+    return {
+        "campaign_id": row["campaign_id"],
+        "trial_id": _row_get(row, "trial_id"),
+        "run_id": row["run_id"],
+        "candidate_id": _row_get(row, "candidate_id")
+        or _row_get(row, "proposal_id"),
+        "proposal_id": _row_get(row, "proposal_id"),
+        "policy_rule": _row_get(row, "policy_rule"),
+        "phase": row["phase"],
+        "status": _row_get(row, "status") or row["outcome"],
+        "failure_class": _row_get(row, "failure_class"),
+        "verified": bool(row["verified"]),
+        "request_digest": _row_get(row, "request_digest"),
+        "execution_manifest_digest": _row_get(
+            row, "execution_manifest_digest"
+        ),
+        "worker_pid": _row_get(row, "worker_pid"),
+        "duration_seconds": _row_get(row, "duration_seconds"),
+        "gpu_seconds": _row_get(row, "gpu_seconds"),
+        "progress_steps": _row_get(row, "progress_steps"),
+        "peak_vram_bytes": peak_bytes,
+        "peak_vram_gib": (
+            round(peak_bytes / 1024**3, 3) if peak_bytes is not None else None
+        ),
+        "metrics": metrics,
+        "workload_identity": _safe_json(
+            _row_get(row, "workload_identity_json"), {}
+        )
+        or {},
+        "config_patch": _safe_json(row["patch_json"], {}) or {},
+        "environment_patch": _safe_json(
+            _row_get(row, "environment_patch_json"), {}
+        )
+        or {},
+        "rationale": row["rationale"],
+        "run": _run_summary(storage, run) if run is not None else None,
+    }
+
+
+def _proposal_payload(row) -> dict:
+    return {
+        "campaign_id": row["campaign_id"],
+        "proposal_id": row["proposal_id"],
+        "policy_rule": row["policy_rule"],
+        "authorization_mode": row["authorization_mode"],
+        "state": row["state"],
+        "skip_code": row["skip_code"],
+        "skip_reason": row["skip_reason"],
+        "rationale": row["rationale"],
+        "proposal": _safe_json(row["proposal_json"], {}) or {},
+    }
+
+
+def _verification_payload(row) -> dict:
+    return {
+        "campaign_id": row["campaign_id"],
+        "candidate_id": row["candidate_id"],
+        "verified": bool(row["verified"]),
+        "confirmation_run_ids": _safe_json(
+            row["confirmation_run_ids_json"], []
+        )
+        or [],
+        "report": _safe_json(row["report_json"], {}) or {},
+        "ordinal": row["ordinal"],
+    }
+
+
+def _campaign_detail(storage: Storage, row) -> dict:
+    campaign_id = row["campaign_id"]
+    report = storage.get_recovery_campaign_report(campaign_id)
+    contract = _safe_json(row["contract_json"], {}) or {}
+    trials = [
+        _trial_payload(storage, item)
+        for item in storage.list_recovery_trials(campaign_id)
+    ]
+    proposals = [
+        _proposal_payload(item)
+        for item in storage.list_recovery_proposals(campaign_id)
+    ]
+    verifications = [
+        _verification_payload(item)
+        for item in storage.list_recovery_verifications(campaign_id)
+    ]
+    return {
+        **_campaign_summary(storage, row),
+        "contract": contract,
+        "contract_digest": _row_get(row, "contract_digest"),
+        "preparation_digest": _row_get(row, "preparation_digest"),
+        "report_digest": _row_get(row, "report_digest"),
+        "planned_candidate_ids": _safe_json(
+            _row_get(row, "planned_candidate_ids_json"), []
+        )
+        or [],
+        "probe_survivor_ids": _safe_json(
+            _row_get(row, "probe_survivor_ids_json"), []
+        )
+        or [],
+        "executed_proposal_ids": _safe_json(
+            _row_get(row, "executed_proposal_ids_json"), []
+        )
+        or [],
+        "skipped_proposals": _safe_json(
+            _row_get(row, "skipped_proposals_json"), []
+        )
+        or [],
+        "usage": _safe_json(_row_get(row, "usage_json"), {}) or {},
+        "ranking": _safe_json(_row_get(row, "ranking_json"), None),
+        "report": report,
+        "trials": trials,
+        "proposals": proposals,
+        "verifications": verifications,
+        "artifact": {
+            "available": bool(_row_get(row, "artifact_path")),
+            "path": _row_get(row, "artifact_path"),
+            "checksum": _row_get(row, "artifact_checksum"),
+            "size_bytes": _row_get(row, "artifact_size_bytes"),
+            "download_url": (
+                "/api/campaigns/{}/artifact".format(campaign_id)
+                if _row_get(row, "artifact_path")
+                else None
+            ),
+        },
+    }
+
+
+def _require_run(storage: Storage, run_id: str):
+    row = storage.get_run(run_id)
+    if row is None:
+        raise HTTPException(404, "Run {!r} not found".format(run_id))
+    return row
+
+
+def _require_campaign(storage: Storage, campaign_id: str):
+    row = storage.get_recovery_campaign(campaign_id)
+    if row is None:
+        raise HTTPException(
+            404, "Campaign {!r} not found".format(campaign_id)
+        )
+    return row
 
 
 def create_app(storage: Optional[Storage] = None) -> FastAPI:
-    storage = storage or Storage()
-    app = FastAPI(title="WatcherML")
+    owns_storage = storage is None
+    shared = Storage() if storage is None else storage
+    app = FastAPI(
+        title="WatcherML",
+        version=API_VERSION,
+        description="Local deterministic OOM evidence and recovery audit API",
+    )
+    app.state.storage = shared
 
-    # -- overview ------------------------------------------------------
-    @app.get("/api/overview")
-    def overview():
-        all_runs = storage.list_runs()
-        projects = {r["project"] for r in all_runs}
-        active = [r for r in all_runs if r["exit_status"] == "running"]
-        needs_attention = [
-            r for r in all_runs
-            if r["exit_status"] == "failed" and not r["resolved"]
-        ]
-        campaigns = storage.list_recovery_campaigns()
-        active_campaigns = [c for c in campaigns if c["ended_at"] is None]
-        recent_verified = [c for c in campaigns if c["best_run_id"]][:5]
-        gpu_info = collectors.collect_gpu_info()
+    if owns_storage:
+        @app.on_event("shutdown")
+        def _close_owned_storage() -> None:
+            shared.close()
+
+    @app.get("/api/health")
+    def health():
         return {
-            "project_count": len(projects),
-            "run_count": len(all_runs),
-            "active_run_count": len(active),
-            "runs_needing_attention": [_row_to_run_summary(storage, r) for r in needs_attention[:10]],
-            "active_campaign_count": len(active_campaigns),
-            "recent_verified_fixes": [
-                {"campaign_id": c["campaign_id"], "project": c["project"],
-                 "best_run_id": c["best_run_id"], "source_run_id": c["source_run_id"]}
-                for c in recent_verified
-            ],
-            "gpu_available": gpu_info.get("available", False),
-            "gpu_name": _gpu_name(json.dumps(gpu_info)),
-            
+            "ok": True,
+            "api_version": API_VERSION,
+            "storage_schema_version": shared.schema_version,
+            "mode": "local_read_only_recovery_ui",
         }
 
-    # -- projects ------------------------------------------------------
+    @app.get("/api/overview")
+    def overview():
+        runs = shared.list_runs()
+        campaigns = shared.list_recovery_campaigns()
+        projects = {row["project"] for row in runs if row["project"]}
+        active_runs = [row for row in runs if row["exit_status"] == "running"]
+        needs_attention = [
+            row
+            for row in runs
+            if row["exit_status"] == "failed"
+            and not bool(_row_get(row, "resolved", 0))
+        ]
+        active_campaigns = [
+            row
+            for row in campaigns
+            if (_row_get(row, "status", "running") or "running") == "running"
+        ]
+        verified = [
+            row for row in campaigns if bool(_row_get(row, "verified", 0))
+        ][:5]
+        gpu = collectors.collect_gpu_info()
+        return {
+            "project_count": len(projects),
+            "run_count": len(runs),
+            "active_run_count": len(active_runs),
+            "failure_count": sum(row["exit_status"] == "failed" for row in runs),
+            "runs_needing_attention": [
+                _run_summary(shared, row) for row in needs_attention[:10]
+            ],
+            "active_campaign_count": len(active_campaigns),
+            "verified_recovery_count": len(
+                [row for row in campaigns if bool(_row_get(row, "verified", 0))]
+            ),
+            "recent_verified_recoveries": [
+                _campaign_summary(shared, row) for row in verified
+            ],
+            # Compatibility alias for an older frontend; values are verifier-backed.
+            "recent_verified_fixes": [
+                {
+                    "campaign_id": row["campaign_id"],
+                    "project": row["project"],
+                    "source_run_id": row["source_run_id"],
+                    "verified_candidate_id": _row_get(
+                        row, "verified_candidate_id"
+                    ),
+                    "verified_run_ids": _safe_json(
+                        _row_get(row, "verified_run_ids_json"), []
+                    )
+                    or [],
+                }
+                for row in verified
+            ],
+            "gpu_available": bool(gpu.get("available", False)),
+            "gpu_name": _gpu_name(gpu),
+            "llm_required": False,
+            "recovery_execution_surface": "sdk_or_cli",
+        }
+
     @app.get("/api/projects")
     def list_projects():
-        rows = storage.list_runs()
-        projects: dict = {}
-        for row in rows:
-            p = projects.setdefault(row["project"], {
-                "name": row["project"], "run_count": 0, "failure_count": 0,
-                "last_started_at": None,
-            })
-            p["run_count"] += 1
+        projects = {}
+        for row in shared.list_runs():
+            item = projects.setdefault(
+                row["project"],
+                {
+                    "name": row["project"],
+                    "run_count": 0,
+                    "failure_count": 0,
+                    "unresolved_failure_count": 0,
+                    "last_started_at": None,
+                },
+            )
+            item["run_count"] += 1
             if row["exit_status"] == "failed":
-                p["failure_count"] += 1
-            if p["last_started_at"] is None or (row["started_at"] or 0) > p["last_started_at"]:
-                p["last_started_at"] = row["started_at"]
-        return sorted(projects.values(), key=lambda p: p["last_started_at"] or 0, reverse=True)
+                item["failure_count"] += 1
+                if not bool(_row_get(row, "resolved", 0)):
+                    item["unresolved_failure_count"] += 1
+            if (
+                item["last_started_at"] is None
+                or (row["started_at"] or 0) > item["last_started_at"]
+            ):
+                item["last_started_at"] = row["started_at"]
+        return sorted(
+            projects.values(),
+            key=lambda item: item["last_started_at"] or 0,
+            reverse=True,
+        )
 
     @app.get("/api/projects/{project}/runs")
     def list_project_runs(project: str):
-        rows = storage.list_runs(project=project)
+        rows = shared.list_runs(project=project)
         if not rows:
-            raise HTTPException(404, f"No runs found for project '{project}'")
-        return [_row_to_run_summary(storage, r) for r in rows]
+            raise HTTPException(
+                404, "No runs found for project {!r}".format(project)
+            )
+        return [_run_summary(shared, row) for row in rows]
 
-    # -- global runs (cross-project, filterable) ------------------------
     @app.get("/api/runs")
-    def list_all_runs(project: Optional[str] = None, status: Optional[str] = None,
-                       hardware: Optional[str] = None, failure_category: Optional[str] = None):
-        rows = storage.list_runs(project=project)
-        summaries = [_row_to_run_summary(storage, r) for r in rows]
+    def list_runs(
+        project: Optional[str] = None,
+        status: Optional[str] = None,
+        hardware: Optional[str] = None,
+        failure_category: Optional[str] = None,
+        unresolved: Optional[bool] = None,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ):
+        summaries = [
+            _run_summary(shared, row)
+            for row in shared.list_runs(project=project)
+        ]
         if status:
-            summaries = [s for s in summaries if s["status"] == status]
+            summaries = [item for item in summaries if item["status"] == status]
         if hardware:
-            summaries = [s for s in summaries if s["hardware"] == hardware]
+            summaries = [
+                item for item in summaries if item["hardware"] == hardware
+            ]
         if failure_category:
-            summaries = [s for s in summaries if s["failure_category"] == failure_category]
-        return summaries
+            summaries = [
+                item
+                for item in summaries
+                if item["failure_category"] == failure_category
+            ]
+        if unresolved is not None:
+            summaries = [
+                item for item in summaries if item["resolved"] is not unresolved
+            ]
+        return summaries[:limit]
 
     @app.patch("/api/runs/{run_id}")
     def update_run(run_id: str, update: RunUpdate):
-        if storage.get_run(run_id) is None:
-            raise HTTPException(404, f"Run '{run_id}' not found")
+        _require_run(shared, run_id)
+        if update.resolved is not None or update.resolved_note is not None:
+            raise HTTPException(
+                409,
+                "Recovery resolution is verifier-owned and cannot be edited from the UI",
+            )
         if update.display_name is not None:
-            storage.set_run_display_name(run_id, update.display_name)
+            shared.set_run_display_name(run_id, update.display_name or None)
         if update.tags is not None:
-            storage.set_run_tags(run_id, update.tags)
-        if update.resolved is not None:
-            storage.set_run_resolved(run_id, update.resolved, update.resolved_note)
-        return _row_to_run_summary(storage, storage.get_run(run_id))
+            cleaned = []
+            for tag in update.tags:
+                value = tag.strip()
+                if not value or len(value) > 64:
+                    raise HTTPException(
+                        422, "Tags must be non-empty and at most 64 characters"
+                    )
+                if value not in cleaned:
+                    cleaned.append(value)
+            if len(cleaned) > 32:
+                raise HTTPException(422, "At most 32 tags are allowed")
+            shared.set_run_tags(run_id, cleaned)
+        return _run_summary(shared, _require_run(shared, run_id))
 
-    # -- run detail ------------------------------------------------------
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str):
-        row = storage.get_run(run_id)
-        if row is None:
-            raise HTTPException(404, f"Run '{run_id}' not found")
-        metrics_over_time: dict = {}
-        for m in storage.get_metrics(run_id):
-            metrics_over_time.setdefault(m["name"], []).append(
-                {"step": m["step"], "value": m["value"], "timestamp": m["timestamp"]})
+        row = _require_run(shared, run_id)
+        metrics = {}
+        for point in shared.get_metrics(run_id):
+            metrics.setdefault(point["name"], []).append(
+                {
+                    "step": point["step"],
+                    "value": point["value"],
+                    "timestamp": point["timestamp"],
+                }
+            )
         return {
-            **_row_to_run_summary(storage, row),
-            "ended_at": row["ended_at"],
-            "git": _safe_json(row["git_json"], {}),
-            "env": _safe_json(row["env_json"], {}),
-            "gpu": _safe_json(row["gpu_json"], {}),
-            "resource_summary": _safe_json(row["resource_json"], {}),
+            **_run_summary(shared, row),
+            "git": _safe_json(row["git_json"], {}) or {},
+            "env": _safe_json(row["env_json"], {}) or {},
+            "gpu": _safe_json(row["gpu_json"], {}) or {},
+            "resource_summary": _safe_json(row["resource_json"], {}) or {},
             "dataset_fingerprint": row["dataset_fingerprint"],
-            "warnings": _safe_json(row["warnings_json"], []),
-            "resolved_note": row["resolved_note"],
-            "metrics_over_time": metrics_over_time,
-            "artifacts": [dict(a) for a in storage.get_artifacts(run_id)],
-            "has_failure": storage.get_failure(run_id) is not None,
+            "warnings": _safe_json(row["warnings_json"], []) or [],
+            "metrics_over_time": metrics,
+            "artifacts": [dict(item) for item in shared.get_artifacts(run_id)],
+            "has_failure": shared.get_failure(run_id) is not None,
         }
 
     @app.get("/api/runs/{run_id}/samples")
-    def get_samples(run_id: str):
-        if storage.get_run(run_id) is None:
-            raise HTTPException(404, f"Run '{run_id}' not found")
-        return [dict(s) for s in storage.get_resource_samples(run_id)]
+    def get_samples(
+        run_id: str,
+        limit: int = Query(default=10_000, ge=1, le=100_000),
+    ):
+        _require_run(shared, run_id)
+        return [
+            dict(item) for item in shared.get_resource_samples(run_id)[:limit]
+        ]
 
     @app.get("/api/runs/{run_id}/export")
     def export_run_capsule(run_id: str):
-        if storage.get_run(run_id) is None:
-            raise HTTPException(404, f"Run '{run_id}' not found")
-        out_path = os.path.join(tempfile.gettempdir(), f"watcher-run-{run_id}.zip")
-        export_capsule(storage, run_id, out_path=out_path)
-        return FileResponse(out_path, filename=f"watcher-run-{run_id}.zip",
-                             media_type="application/zip")
+        _require_run(shared, run_id)
+        descriptor, path = tempfile.mkstemp(
+            prefix="watcher-run-{}-".format(run_id), suffix=".zip"
+        )
+        os.close(descriptor)
+        try:
+            export_capsule(shared, run_id, out_path=path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+            raise
+        return FileResponse(
+            path,
+            filename="watcher-run-{}.zip".format(run_id),
+            media_type="application/zip",
+            background=BackgroundTask(_remove_file, path),
+        )
 
     @app.get("/api/runs/{run_id}/metrics.csv")
     def export_metrics_csv(run_id: str):
-        """Plain CSV of every logged metric point -- step, name, value,
-        timestamp -- for import into a spreadsheet or another tool. This is
-        the run's metrics only; use /export for the full reproduction capsule."""
-        if storage.get_run(run_id) is None:
-            raise HTTPException(404, f"Run '{run_id}' not found")
-        rows = storage.get_metrics(run_id)
-        lines = ["step,name,value,timestamp"]
-        for r in rows:
-            lines.append(f"{r['step']},{r['name']},{r['value']},{r['timestamp']}")
-        csv_text = "\n".join(lines)
+        _require_run(shared, run_id)
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(("step", "name", "value", "timestamp"))
+        for row in shared.get_metrics(run_id):
+            writer.writerow(
+                (row["step"], row["name"], row["value"], row["timestamp"])
+            )
         return Response(
-            content=csv_text, media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{run_id}_metrics.csv"'},
+            content=stream.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": 'attachment; filename="{}_metrics.csv"'.format(
+                    run_id
+                )
+            },
         )
 
-    # -- failure capsule ------------------------------------------------
     @app.get("/api/failures")
-    def list_failures(project: Optional[str] = None):
-        rows = storage.list_failures(project=project)
-        out = []
-        for row in rows:
-            out.append({
-                "run_id": row["run_id"],
-                "project": row["project"],
-                "message": row["message"],
-                "rule": (_safe_json(row["diagnosis_json"], {}) or {}).get("rule"),
-            })
-        return out
+    def list_failures(
+        project: Optional[str] = None,
+        unresolved: Optional[bool] = None,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ):
+        output = []
+        for failure in shared.list_failures(project=project):
+            run = shared.get_run(failure["run_id"])
+            item = {
+                "run_id": failure["run_id"],
+                "project": _row_get(failure, "project"),
+                "message": failure["message"],
+                "failure_class": _row_get(failure, "failure_class")
+                or (_safe_json(failure["diagnosis_json"], {}) or {}).get("rule"),
+                "rule": (_safe_json(failure["diagnosis_json"], {}) or {}).get(
+                    "rule"
+                ),
+                "captured_at": _row_get(failure, "captured_at"),
+                "capsule_schema_version": _row_get(
+                    failure, "capsule_schema_version"
+                ),
+                "resolved": bool(_row_get(run, "resolved", 0)),
+            }
+            if unresolved is None or item["resolved"] is not unresolved:
+                output.append(item)
+        return output[:limit]
 
     @app.get("/api/runs/{run_id}/failure")
     def get_failure(run_id: str):
-        row = storage.get_run(run_id)
-        if row is None:
-            raise HTTPException(404, f"Run '{run_id}' not found")
-
-        capsule = storage.get_failure_capsule(run_id)
-        if capsule is None:
-            raise HTTPException(404, f"Run '{run_id}' did not fail")
-
-        evidence = capsule.get("evidence") or {}
-
-        # Compatibility for failures recorded before capsule schema v1.
-        if capsule.get("capsule_schema_version") == "legacy":
-            classification = (
-                capsule.get("classification")
-                or capsule.get("diagnosis")
-                or {}
-            )
-
-            nearest_success = compare_to_last_success(
-                storage,
-                row["project"],
-                run_id,
-            )
-
-            capsule = {
-                **capsule,
-                "evidence_index": build_evidence_index(evidence),
-                "similar_previous_failures": find_similar_failures(
-                    storage,
-                    row["project"],
-                    run_id,
-                    classification.get("rule", ""),
-                ),
-                "nearest_successful_run": nearest_success,
-                "comparison_to_last_success": nearest_success,
-            }
-
+        run = _require_run(shared, run_id)
+        failure = shared.get_failure(run_id)
+        if failure is None:
+            raise HTTPException(404, "Run {!r} did not fail".format(run_id))
+        capsule = shared.get_failure_capsule(run_id) or {}
+        evidence = capsule.get("evidence") or _safe_json(
+            failure["evidence_json"], {}
+        )
+        diagnosis = (
+            capsule.get("classification")
+            or capsule.get("diagnosis")
+            or _safe_json(failure["diagnosis_json"], {})
+            or {}
+        )
+        failure_payload = capsule.get("failure") or {}
+        evidence_index = capsule.get("evidence_index") or build_evidence_index(
+            evidence
+        )
         return {
             **capsule,
-            "display_name": _display_name(row),
-            "simulated": bool(
-                (evidence.get("config") or {}).get("_simulated")
+            "run_id": run_id,
+            "display_name": _display_name(run),
+            "exception_type": failure_payload.get("exception_type")
+            or failure["exception_type"],
+            "message": failure_payload.get("message") or failure["message"],
+            "traceback": failure_payload.get("traceback")
+            or failure["traceback"],
+            "failure_class": capsule.get("failure_class")
+            or failure_payload.get("class")
+            or _row_get(failure, "failure_class")
+            or diagnosis.get("rule"),
+            "diagnosis": diagnosis,
+            "evidence": evidence,
+            "evidence_index": evidence_index,
+            "similar_previous_failures": find_similar_failures(
+                shared,
+                run["project"],
+                run_id,
+                diagnosis.get("rule", ""),
             ),
-            "resolved": (
-                bool(row["resolved"])
-                if row["resolved"] is not None
-                else False
+            "comparison_to_last_success": compare_to_last_success(
+                shared, run["project"], run_id
             ),
+            "simulated": bool((evidence.get("config") or {}).get("_simulated")),
+            "resolved": bool(_row_get(run, "resolved", 0)),
+            "resolved_note": _row_get(run, "resolved_note"),
         }
 
-    # -- comparison ------------------------------------------------------
     @app.get("/api/compare")
     def compare(a: str, b: str):
         try:
-            return compare_runs(storage, a, b)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
+            return compare_runs(shared, a, b)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
-    # -- campaigns --------------------------------------------------------
     @app.get("/api/campaigns")
-    def list_campaigns(project: Optional[str] = None):
-        rows = storage.list_recovery_campaigns(project=project)
-        campaigns = []
-
-        for row in rows:
-            trials = storage.list_recovery_trials(row["campaign_id"])
-            report = _safe_json(row["report_json"], {})
-
-            campaigns.append({
-                "campaign_id": row["campaign_id"],
-                "project": row["project"],
-                "source_run_id": row["source_run_id"],
-                "started_at": row["started_at"],
-                "ended_at": row["ended_at"],
-                "stopped_reason": row["stopped_reason"],
-
-                # Populated only after confirmation verification.
-                "best_run_id": row["best_run_id"],
-
-                # Completed trial awaiting subprocess confirmation.
-                "provisional_best_run_id": report.get(
-                    "provisional_best_run_id"
-                ),
-                "provisional_best_patch": report.get(
-                    "provisional_best_patch"
-                ),
-                "verification_status": report.get(
-                    "verification_status",
-                    "not_recovered",
-                ),
-
-                "trial_count": len(trials),
-                "status": (
-                    "active"
-                    if row["ended_at"] is None
-                    else "stopped"
-                ),
-            })
-
-        return campaigns
+    def list_campaigns(
+        project: Optional[str] = None,
+        status: Optional[str] = None,
+        verified: Optional[bool] = None,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ):
+        rows = shared.list_recovery_campaigns(
+            project=project, status=status, verified=verified
+        )
+        return [_campaign_summary(shared, row) for row in rows[:limit]]
 
     @app.get("/api/campaigns/{campaign_id}")
     def get_campaign(campaign_id: str):
-        row = storage.get_recovery_campaign(campaign_id)
-        if row is None:
-            raise HTTPException(404, f"Campaign '{campaign_id}' not found")
-        contract = _safe_json(row["contract_json"], {})
-        goal_metric = contract.get("goal_metric")
-        trials = storage.list_recovery_trials(campaign_id)
-        trial_list = []
-        for t in trials:
-            trial_run = storage.get_run(t["run_id"])
-            final_metrics = storage.final_metrics(t["run_id"]) if trial_run else {}
-            resource_summary = _safe_json(trial_run["resource_json"], {}) if trial_run else {}
-            vram_peak_mib = (resource_summary or {}).get("vram_used_mib_peak")
-            objective_value = final_metrics.get(goal_metric) if goal_metric else None
-            result_summary = (
-                f"{goal_metric} {objective_value:.4g}" if objective_value is not None
-                else t["outcome"] if t["outcome"] != "success" else None
-            )
-            trial_list.append({
-                "run_id": t["run_id"],
-                "phase": t["phase"],
-                "patch": _safe_json(t["patch_json"], {}),
-                "rationale": t["rationale"],
-                "confidence": t["confidence"],
-                "outcome": t["outcome"],
-                "score": t["score"],
-                "verified": bool(t["verified"]),
-                "final_metrics": final_metrics,
-                "peak_vram_gb": round(vram_peak_mib / 1024, 2) if vram_peak_mib else None,
-                "objective_value": objective_value,
-                "result_summary": result_summary,
-            })
-        return {
-            "campaign_id": row["campaign_id"],
-            "project": row["project"],
-            "source_run_id": row["source_run_id"],
-            "contract": contract,
-            "started_at": row["started_at"],
-            "ended_at": row["ended_at"],
-            "stopped_reason": row["stopped_reason"],
-            "best_run_id": row["best_run_id"],
-            "report": _safe_json(row["report_json"], {}),
-            "trials": trial_list,
-        }
+        return _campaign_detail(
+            shared, _require_campaign(shared, campaign_id)
+        )
 
-    # -- resolution memory -------------------------------------------------
+    @app.get("/api/campaigns/{campaign_id}/report")
+    def get_campaign_report(campaign_id: str):
+        _require_campaign(shared, campaign_id)
+        report = shared.get_recovery_campaign_report(campaign_id)
+        if report is None:
+            raise HTTPException(404, "Campaign report is not available yet")
+        return report
+
+    @app.get("/api/campaigns/{campaign_id}/trials")
+    def get_campaign_trials(campaign_id: str):
+        _require_campaign(shared, campaign_id)
+        return [
+            _trial_payload(shared, row)
+            for row in shared.list_recovery_trials(campaign_id)
+        ]
+
+    @app.get("/api/campaigns/{campaign_id}/proposals")
+    def get_campaign_proposals(campaign_id: str):
+        _require_campaign(shared, campaign_id)
+        return [
+            _proposal_payload(row)
+            for row in shared.list_recovery_proposals(campaign_id)
+        ]
+
+    @app.get("/api/campaigns/{campaign_id}/verifications")
+    def get_campaign_verifications(campaign_id: str):
+        _require_campaign(shared, campaign_id)
+        return [
+            _verification_payload(row)
+            for row in shared.list_recovery_verifications(campaign_id)
+        ]
+
+    @app.get("/api/campaigns/{campaign_id}/artifact")
+    def download_campaign_artifact(campaign_id: str):
+        row = _require_campaign(shared, campaign_id)
+        path_value = _row_get(row, "artifact_path")
+        if not path_value:
+            raise HTTPException(404, "Recovery result artifact is not available")
+        path = Path(path_value).expanduser().resolve()
+        if not path.is_file():
+            raise HTTPException(404, "Recovery result artifact is missing on disk")
+        expected_size = _row_get(row, "artifact_size_bytes")
+        payload = path.read_bytes()
+        if expected_size is not None and len(payload) != expected_size:
+            raise HTTPException(409, "Recovery result artifact size check failed")
+        expected_checksum = _row_get(row, "artifact_checksum")
+        checksum = hashlib.sha256(payload).hexdigest()
+        if expected_checksum and checksum != expected_checksum:
+            raise HTTPException(409, "Recovery result artifact checksum failed")
+        return FileResponse(
+            path,
+            filename="{}-{}".format(campaign_id, RECOVERY_RESULT_FILENAME),
+            media_type="application/json",
+            headers={"X-WatcherML-SHA256": checksum},
+        )
+
     @app.get("/api/memory")
-    def memory(project: Optional[str] = None):
-        return storage.resolution_memory(project=project)
+    def resolution_memory(project: Optional[str] = None):
+        return shared.resolution_memory(project=project)
 
-    # -- settings ------------------------------------------------------
     @app.get("/api/settings")
     def settings():
+        gpu = collectors.collect_gpu_info()
         return {
-            "data_directory": storage.root,
-            "database_path": storage.db_path,
-            "gpu": collectors.collect_gpu_info(),
+            "data_directory": shared.root,
+            "database": shared.db_path,
+            "database_path": shared.db_path,
+            "storage_schema_version": shared.schema_version,
+            "gpu": gpu,
+            "gpu_available": bool(gpu.get("available", False)),
+            "llm_required": False,
+            "recovery_execution_surface": "sdk_or_cli",
+            "trial_isolation": "fresh_subprocess",
+            "web_recovery_mutations_enabled": False,
         }
 
-    # -- static frontend ------------------------------------------------
     @app.get("/")
     def index():
-        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+        index_path = os.path.join(STATIC_DIR, "index.html")
+        if not os.path.isfile(index_path):
+            raise HTTPException(404, "WatcherML web assets are not installed")
+        return FileResponse(index_path)
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
+    if os.path.isdir(STATIC_DIR):
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
+
+
+def _remove_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass

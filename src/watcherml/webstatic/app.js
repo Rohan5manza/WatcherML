@@ -15,10 +15,16 @@ function stopActivePoll() {
 function notify(message, kind = "success", timeout = 3200) {
   const region = document.getElementById("toast-region");
   if (!region) return;
+
   const toast = document.createElement("div");
   toast.className = `toast ${kind}`;
-  toast.innerHTML = `<span class="toast-symbol">${kind === "error" ? "!" : "✓"}</span><span class="toast-message">${esc(message)}</span>`;
+  toast.innerHTML = `
+    <span class="toast-symbol">${kind === "error" ? "!" : "✓"}</span>
+    <span class="toast-message">${esc(message)}</span>
+  `;
+
   region.appendChild(toast);
+
   window.setTimeout(() => {
     toast.classList.add("out");
     window.setTimeout(() => toast.remove(), 220);
@@ -27,15 +33,20 @@ function notify(message, kind = "success", timeout = 3200) {
 
 function startRouteProgress() {
   if (!routeProgress) return;
+
   routeProgress.classList.remove("done");
   routeProgress.classList.add("active");
 }
 
 function finishRouteProgress() {
   if (!routeProgress) return;
+
   routeProgress.classList.remove("active");
   routeProgress.classList.add("done");
-  window.setTimeout(() => routeProgress.classList.remove("done"), 260);
+
+  window.setTimeout(() => {
+    routeProgress.classList.remove("done");
+  }, 260);
 }
 
 function setupGlobalUI() {
@@ -45,65 +56,14 @@ function setupGlobalUI() {
   const sidebar = document.getElementById("sidebar");
   const mobileButton = document.getElementById("mobile-menu-button");
 
-  // Keep older index.html installations aligned with the v1 product vocabulary.
-  const setNavCopy = (route, label, title = label) => {
-    const link = document.querySelector(`#sidebar-nav [data-route="${route}"]`);
-    const text = link?.querySelector(".nav-label");
-    if (text) text.textContent = label;
-    if (link) link.title = title;
-  };
-
-  const setCommandCopy = (href, label, description) => {
-    const item = document.querySelector(`[data-command-item][href="${href}"]`);
-    const labelNode = [...(item?.childNodes || [])]
-      .find((node) => node.nodeType === 3);
-
-    if (labelNode) labelNode.nodeValue = `${label} `;
-
-    const detail = item?.querySelector("span");
-    if (detail) detail.textContent = description;
-  };
-
-  setNavCopy(
-    "campaigns",
-    "Recoveries",
-    "Controlled OOM recovery trials",
-  );
-  setNavCopy(
-    "memory",
-    "Verified history",
-    "Verified recovery history",
-  );
-
-  setCommandCopy(
-    "#/campaigns",
-    "Recoveries",
-    "Review bounded, isolated OOM trials",
-  );
-  setCommandCopy(
-    "#/memory",
-    "Verified history",
-    "Confirmed recovery evidence only",
-  );
-  setCommandCopy(
-    "#/settings",
-    "Settings",
-    "Local storage, runtime, and GPU",
-  );
-
-  const brandKicker = document.querySelector(".brand-kicker");
-  if (brandKicker) brandKicker.textContent = "Recovery console";
-
-  if (search) {
-    search.placeholder = "Go to runs, failures, recoveries…";
-  }
-
   const closePalette = () => {
     if (!palette) return;
 
     palette.hidden = true;
 
-    if (search) search.value = "";
+    if (search) {
+      search.value = "";
+    }
 
     document
       .querySelectorAll("[data-command-item]")
@@ -139,10 +99,9 @@ function setupGlobalUI() {
     document
       .querySelectorAll("[data-command-item]")
       .forEach((item) => {
-        item.hidden = Boolean(
-          query &&
-          !item.textContent.toLowerCase().includes(query)
-        );
+        item.hidden =
+          Boolean(query) &&
+          !item.textContent.toLowerCase().includes(query);
       });
   });
 
@@ -169,11 +128,7 @@ function setupGlobalUI() {
 
   mobileButton?.addEventListener("click", () => {
     const isOpen = sidebar?.classList.toggle("open");
-
-    mobileButton.setAttribute(
-      "aria-expanded",
-      String(Boolean(isOpen)),
-    );
+    mobileButton.setAttribute("aria-expanded", String(Boolean(isOpen)));
   });
 
   document
@@ -187,16 +142,16 @@ function setupGlobalUI() {
 
   document.addEventListener("click", async (event) => {
     const copyButton = event.target.closest("[data-copy]");
+
     if (!copyButton) return;
 
     try {
       await navigator.clipboard.writeText(
-        copyButton.dataset.copy || "",
+        copyButton.dataset.copy || ""
       );
 
       notify(
-        copyButton.dataset.copyLabel ||
-        "Copied to clipboard",
+        copyButton.dataset.copyLabel || "Copied to clipboard"
       );
     } catch (_) {
       notify("Clipboard access was unavailable", "error");
@@ -224,14 +179,14 @@ function formatGpuTime(seconds) {
 
 function firstFinite(...values) {
   for (const value of values) {
-    const number = Number(value);
+    const numericValue = Number(value);
 
     if (
       value !== null &&
       value !== undefined &&
-      Number.isFinite(number)
+      Number.isFinite(numericValue)
     ) {
-      return number;
+      return numericValue;
     }
   }
 
@@ -251,14 +206,16 @@ function formatPatch(patch) {
 
   return entries
     .map(([key, value]) => {
-      const formattedValue =
+      const label = key.replaceAll("_", " ");
+
+      const renderedValue =
         typeof value === "boolean"
           ? value
             ? "enabled"
             : "disabled"
           : value;
 
-      return `${key.replaceAll("_", " ")} → ${formattedValue}`;
+      return `${label} → ${renderedValue}`;
     })
     .join(" · ");
 }
@@ -267,12 +224,10 @@ async function api(path, options) {
   const response = await fetch("/api" + path, options);
 
   if (!response.ok) {
-    const body = await response
-      .json()
-      .catch(() => ({}));
+    const body = await response.json().catch(() => ({}));
 
     throw new Error(
-      body.detail || `Request failed: ${response.status}`,
+      body.detail || `Request failed: ${response.status}`
     );
   }
 
@@ -284,16 +239,13 @@ function esc(value) {
     return "&mdash;";
   }
 
-  return String(value).replace(
-    /[&<>"']/g,
-    (character) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    })[character],
-  );
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]);
 }
 
 function fmtNum(value, digits = 4) {
@@ -305,12 +257,14 @@ function fmtNum(value, digits = 4) {
     return esc(value);
   }
 
-  return Number.isInteger(value)
-    ? String(value)
-    : value
-        .toFixed(digits)
-        .replace(/0+$/, "")
-        .replace(/\.$/, "");
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+
+  return value
+    .toFixed(digits)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
 }
 
 function fmtDuration(seconds) {
@@ -325,7 +279,9 @@ function fmtDuration(seconds) {
 }
 
 function fmtTimestamp(timestamp) {
-  if (!timestamp) return "&mdash;";
+  if (!timestamp) {
+    return "&mdash;";
+  }
 
   const date = new Date(timestamp * 1000);
 
@@ -338,23 +294,94 @@ function fmtTimestamp(timestamp) {
 }
 
 function badge(status) {
-  const badgeClass =
-    status === "success"
-      ? "success"
-      : status === "failed"
-        ? "failed"
-        : "running";
+  const normalized = String(status || "running").toLowerCase();
+
+  const className = [
+    "success",
+    "verified",
+    "completed",
+  ].includes(normalized)
+    ? "success"
+    : [
+        "failed",
+        "training_failed",
+        "integration_error",
+        "stopped",
+        "not_recovered",
+      ].includes(normalized)
+      ? "failed"
+      : "running";
 
   return `
-    <span class="badge ${badgeClass}">
+    <span class="badge ${className}">
       ${esc(status || "running")}
     </span>
   `;
 }
 
+function verificationBadge(status) {
+  const normalized = status || "pending";
+
+  const className =
+    normalized === "verified"
+      ? "success"
+      : normalized === "not_verified"
+        ? "failed"
+        : "running";
+
+  return `
+    <span class="badge ${className}">
+      ${esc(normalized.replaceAll("_", " "))}
+    </span>
+  `;
+}
+
+function fmtBytes(bytes) {
+  if (bytes === null || bytes === undefined) {
+    return "&mdash;";
+  }
+
+  const numericValue = Number(bytes);
+
+  if (!Number.isFinite(numericValue)) {
+    return esc(bytes);
+  }
+
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let size = Math.max(0, numericValue);
+  let index = 0;
+
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+
+  return `${size.toFixed(index ? 2 : 0)} ${units[index]}`;
+}
+
+function shortDigest(value) {
+  if (!value) {
+    return "&mdash;";
+  }
+
+  const text = String(value);
+
+  return text.length > 18
+    ? `${text.slice(0, 12)}…${text.slice(-6)}`
+    : esc(text);
+}
+
+function jsonBlock(value) {
+  return `
+    <pre class="traceback"><code>${esc(
+      JSON.stringify(value ?? {}, null, 2)
+    )}</code></pre>
+  `;
+}
+
 function demoBadge(simulated) {
   return simulated
-    ? `<span class="pill demo">Simulated OOM</span>`
+    ? `<span class="pill demo">Simulated OOM Scenario</span>`
     : "";
 }
 
@@ -365,7 +392,9 @@ function resolvedBadge(resolved) {
 }
 
 function tagPills(tags) {
-  if (!tags || !tags.length) return "";
+  if (!tags || !tags.length) {
+    return "";
+  }
 
   return tags
     .map((tag) => `<span class="pill tag">${esc(tag)}</span>`)
@@ -374,12 +403,12 @@ function tagPills(tags) {
 
 function provenance(kind) {
   const labels = {
-    captured: "Captured evidence",
-    "rule-based": "Deterministic rule",
-    policy: "Bounded policy",
+    "rule-based": "Rule-based",
     calculated: "Calculated",
-    verified: "Verified outcome",
-    inconclusive: "Inconclusive",
+    deterministic: "Deterministic policy",
+    isolated: "Fresh subprocess",
+    provisional: "Provisional only",
+    verified: "Verifier-backed",
   };
 
   return `
@@ -389,9 +418,7 @@ function provenance(kind) {
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Telemetry traces
-// -----------------------------------------------------------------------------
+// -------------------- trace strip --------------------
 
 function renderTrace(samples, containerLabel) {
   if (!samples || samples.length < 2) {
@@ -409,7 +436,7 @@ function renderTrace(samples, containerLabel) {
           so very short runs may not have enough points for a trace.
           ${
             sampleCount > 0
-              ? "This updates live while the run is active."
+              ? "This updates live while the run is active. Refresh or wait a moment."
               : ""
           }
         </div>
@@ -420,27 +447,28 @@ function renderTrace(samples, containerLabel) {
   const hasGpu = samples.some(
     (sample) =>
       sample.gpu_util_pct !== null &&
-      sample.gpu_util_pct !== undefined,
+      sample.gpu_util_pct !== undefined
   );
 
   const hasCpu = samples.some(
     (sample) =>
       sample.cpu_pct !== null &&
-      sample.cpu_pct !== undefined,
+      sample.cpu_pct !== undefined
   );
 
-  const startTime = samples[0].t;
+  const firstTimestamp = samples[0].t;
+
   const timeSpan = Math.max(
     1,
-    samples[samples.length - 1].t - startTime,
+    samples[samples.length - 1].t - firstTimestamp
   );
 
   const width = 1000;
   const height = 130;
-  const paddingLeft = 34;
-  const paddingRight = 10;
-  const paddingTop = 8;
-  const paddingBottom = 20;
+  const leftPadding = 34;
+  const rightPadding = 10;
+  const topPadding = 8;
+  const bottomPadding = 20;
 
   function toPath(key, color) {
     const points = [];
@@ -448,23 +476,27 @@ function renderTrace(samples, containerLabel) {
     samples.forEach((sample) => {
       const value = sample[key];
 
-      if (value === null || value === undefined) return;
+      if (value === null || value === undefined) {
+        return;
+      }
 
       const x =
-        paddingLeft +
-        ((sample.t - startTime) / timeSpan) *
-          (width - paddingLeft - paddingRight);
+        leftPadding +
+        ((sample.t - firstTimestamp) / timeSpan) *
+          (width - leftPadding - rightPadding);
 
       const y =
         height -
-        paddingBottom -
+        bottomPadding -
         (Math.min(100, Math.max(0, value)) / 100) *
-          (height - paddingTop - paddingBottom);
+          (height - topPadding - bottomPadding);
 
       points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
     });
 
-    if (points.length < 2) return "";
+    if (points.length < 2) {
+      return "";
+    }
 
     return `
       <polyline
@@ -490,21 +522,22 @@ function renderTrace(samples, containerLabel) {
     .map((value) => {
       const y =
         height -
-        paddingBottom -
+        bottomPadding -
         (value / 100) *
-          (height - paddingTop - paddingBottom);
+          (height - topPadding - bottomPadding);
 
       return `
         <line
-          x1="${paddingLeft}"
-          x2="${width - paddingRight}"
+          x1="${leftPadding}"
+          x2="${width - rightPadding}"
           y1="${y}"
           y2="${y}"
           stroke="rgba(109,125,147,.18)"
           stroke-width="1"
         />
+
         <text
-          x="${paddingLeft - 6}"
+          x="${leftPadding - 6}"
           y="${y + 3}"
           text-anchor="end"
           font-size="9"
@@ -519,14 +552,16 @@ function renderTrace(samples, containerLabel) {
 
   const formatElapsed = (seconds) => {
     const minutes = Math.floor(seconds / 60);
-    const remaining = Math.round(seconds % 60);
+    const remainingSeconds = String(
+      Math.round(seconds % 60)
+    ).padStart(2, "0");
 
-    return `${minutes}:${String(remaining).padStart(2, "0")}`;
+    return `${minutes}:${remainingSeconds}`;
   };
 
   const xLabels = `
     <text
-      x="${paddingLeft}"
+      x="${leftPadding}"
       y="${height - 4}"
       font-size="9"
       fill="var(--ink-faint)"
@@ -536,7 +571,7 @@ function renderTrace(samples, containerLabel) {
     </text>
 
     <text
-      x="${width - paddingRight}"
+      x="${width - rightPadding}"
       y="${height - 4}"
       text-anchor="end"
       font-size="9"
@@ -576,29 +611,29 @@ function renderTrace(samples, containerLabel) {
   const vramSamples = samples.filter(
     (sample) =>
       sample.gpu_mem_used_mib !== null &&
-      sample.gpu_mem_used_mib !== undefined,
+      sample.gpu_mem_used_mib !== undefined
   );
 
   let vramSection = "";
 
   if (vramSamples.length >= 2) {
     const values = vramSamples.map(
-      (sample) => sample.gpu_mem_used_mib,
+      (sample) => sample.gpu_mem_used_mib
     );
 
-    const maximum = Math.max(...values) * 1.15 || 1;
+    const maximumValue = Math.max(...values) * 1.15 || 1;
     const vramHeight = 44;
 
-    const points = vramSamples
+    const vramPoints = vramSamples
       .map((sample) => {
         const x =
-          paddingLeft +
-          ((sample.t - startTime) / timeSpan) *
-            (width - paddingLeft - paddingRight);
+          leftPadding +
+          ((sample.t - firstTimestamp) / timeSpan) *
+            (width - leftPadding - rightPadding);
 
         const y =
           vramHeight -
-          (sample.gpu_mem_used_mib / maximum) *
+          (sample.gpu_mem_used_mib / maximumValue) *
             (vramHeight - 6) -
           2;
 
@@ -614,10 +649,10 @@ function renderTrace(samples, containerLabel) {
 
       <svg
         viewBox="0 0 ${width} ${vramHeight}"
-        style="width:100%;height:${vramHeight}px;display:block;"
+        style="width:100%; height:${vramHeight}px; display:block;"
       >
         <polyline
-          points="${points}"
+          points="${vramPoints}"
           fill="none"
           stroke="var(--signal-violet)"
           stroke-width="1.5"
@@ -629,7 +664,7 @@ function renderTrace(samples, containerLabel) {
   const diskSection = samples.some(
     (sample) =>
       sample.disk_read_mbps !== null &&
-      sample.disk_read_mbps !== undefined,
+      sample.disk_read_mbps !== undefined
   )
     ? renderRateMiniChart(
         samples,
@@ -645,14 +680,14 @@ function renderTrace(samples, containerLabel) {
             color: "var(--signal-amber)",
           },
         ],
-        "Disk I/O",
+        "Disk I/O"
       )
     : "";
 
   const networkSection = samples.some(
     (sample) =>
       sample.net_sent_mbps !== null &&
-      sample.net_sent_mbps !== undefined,
+      sample.net_sent_mbps !== undefined
   )
     ? renderRateMiniChart(
         samples,
@@ -668,7 +703,7 @@ function renderTrace(samples, containerLabel) {
             color: "var(--signal-violet)",
           },
         ],
-        "Network I/O",
+        "Network I/O"
       )
     : "";
 
@@ -677,7 +712,8 @@ function renderTrace(samples, containerLabel) {
       <div class="trace-label">
         <span>${containerLabel}</span>
         <span>
-          ${samples.length} samples over ${formatElapsed(timeSpan)}
+          ${samples.length} samples over
+          ${formatElapsed(timeSpan)}
         </span>
       </div>
 
@@ -685,7 +721,7 @@ function renderTrace(samples, containerLabel) {
 
       <svg
         viewBox="0 0 ${width} ${height}"
-        style="width:100%;height:${height}px;display:block;"
+        style="width:100%; height:${height}px; display:block;"
       >
         ${yTicks}
         ${gpuPath}
@@ -701,65 +737,72 @@ function renderTrace(samples, containerLabel) {
 }
 
 function renderRateMiniChart(samples, seriesDefinitions, title) {
-  const startTime = samples[0].t;
+  const firstTimestamp = samples[0].t;
+
   const timeSpan = Math.max(
     1,
-    samples[samples.length - 1].t - startTime,
+    samples[samples.length - 1].t - firstTimestamp
   );
 
   const width = 1000;
   const height = 70;
-  const paddingLeft = 46;
-  const paddingRight = 10;
-  const paddingTop = 6;
-  const paddingBottom = 16;
-
+  const leftPadding = 46;
+  const rightPadding = 10;
+  const topPadding = 6;
+  const bottomPadding = 16;
   const allValues = [];
 
-  seriesDefinitions.forEach((series) => {
+  seriesDefinitions.forEach((definition) => {
     samples.forEach((sample) => {
-      const value = sample[series.key];
-
-      if (value !== null && value !== undefined) {
-        allValues.push(value);
+      if (
+        sample[definition.key] !== null &&
+        sample[definition.key] !== undefined
+      ) {
+        allValues.push(sample[definition.key]);
       }
     });
   });
 
-  if (!allValues.length) return "";
+  if (!allValues.length) {
+    return "";
+  }
 
-  const maximum = Math.max(...allValues, 0.001) * 1.15;
+  const maximumValue = Math.max(...allValues, 0.001) * 1.15;
 
   const paths = seriesDefinitions
-    .map((series) => {
+    .map((definition) => {
       const points = [];
 
       samples.forEach((sample) => {
-        const value = sample[series.key];
+        const value = sample[definition.key];
 
-        if (value === null || value === undefined) return;
+        if (value === null || value === undefined) {
+          return;
+        }
 
         const x =
-          paddingLeft +
-          ((sample.t - startTime) / timeSpan) *
-            (width - paddingLeft - paddingRight);
+          leftPadding +
+          ((sample.t - firstTimestamp) / timeSpan) *
+            (width - leftPadding - rightPadding);
 
         const y =
           height -
-          paddingBottom -
-          (Math.max(0, value) / maximum) *
-            (height - paddingTop - paddingBottom);
+          bottomPadding -
+          (Math.max(0, value) / maximumValue) *
+            (height - topPadding - bottomPadding);
 
         points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
       });
 
-      if (points.length < 2) return "";
+      if (points.length < 2) {
+        return "";
+      }
 
       return `
         <polyline
           points="${points.join(" ")}"
           fill="none"
-          stroke="${series.color}"
+          stroke="${definition.color}"
           stroke-width="1.6"
         />
       `;
@@ -768,47 +811,46 @@ function renderRateMiniChart(samples, seriesDefinitions, title) {
 
   const legend = seriesDefinitions
     .map(
-      (series) => `
+      (definition) => `
         <span>
-          <i style="background:${series.color}"></i>
-          ${esc(series.label)}
+          <i style="background:${definition.color}"></i>
+          ${esc(definition.label)}
         </span>
-      `,
+      `
     )
     .join("");
+
+  const yLabel = `
+    <text
+      x="${leftPadding - 6}"
+      y="${topPadding + 8}"
+      text-anchor="end"
+      font-size="9"
+      fill="var(--ink-faint)"
+      font-family="var(--font-mono)"
+    >
+      ${fmtNum(maximumValue, 1)} MB/s
+    </text>
+  `;
 
   return `
     <div class="trace-label" style="margin-top:10px;">
       <span>${esc(title)}</span>
     </div>
 
-    <div class="trace-legend">
-      ${legend}
-    </div>
+    <div class="trace-legend">${legend}</div>
 
     <svg
       viewBox="0 0 ${width} ${height}"
-      style="width:100%;height:${height}px;display:block;"
+      style="width:100%; height:${height}px; display:block;"
     >
-      <text
-        x="${paddingLeft - 6}"
-        y="${paddingTop + 8}"
-        text-anchor="end"
-        font-size="9"
-        fill="var(--ink-faint)"
-        font-family="var(--font-mono)"
-      >
-        ${fmtNum(maximum, 1)} MB/s
-      </text>
-
+      ${yLabel}
       ${paths}
     </svg>
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Metric charts
-// -----------------------------------------------------------------------------
+// -------------------- per-metric line charts --------------------
 
 const METRIC_CHART_COLORS = [
   "var(--signal-mint)",
@@ -829,7 +871,7 @@ function renderMetricChart(name, points, color) {
   const sorted = [...points].sort(
     (left, right) =>
       (left.step ?? left.timestamp) -
-      (right.step ?? right.timestamp),
+      (right.step ?? right.timestamp)
   );
 
   const values = sorted.map((point) => point.value);
@@ -837,7 +879,7 @@ function renderMetricChart(name, points, color) {
   const steps = sorted.map((point, index) =>
     point.step !== null && point.step !== undefined
       ? point.step
-      : index,
+      : index
   );
 
   if (values.length === 1) {
@@ -851,8 +893,8 @@ function renderMetricChart(name, points, color) {
         </div>
 
         <p class="ai-empty" style="margin-top:8px;">
-          Only one value has been logged. A trend line needs
-          at least two points.
+          Only one value has been logged. A trend line needs at
+          least two points.
         </p>
       </div>
     `;
@@ -860,10 +902,10 @@ function renderMetricChart(name, points, color) {
 
   const width = 620;
   const height = 170;
-  const paddingLeft = 50;
-  const paddingRight = 12;
-  const paddingTop = 12;
-  const paddingBottom = 24;
+  const leftPadding = 50;
+  const rightPadding = 12;
+  const topPadding = 12;
+  const bottomPadding = 24;
 
   const minimumValue = Math.min(...values);
   const maximumValue = Math.max(...values);
@@ -879,16 +921,14 @@ function renderMetricChart(name, points, color) {
 
   const coordinates = sorted.map((point, index) => ({
     x:
-      paddingLeft +
+      leftPadding +
       ((steps[index] - minimumStep) / stepSpan) *
-        (width - paddingLeft - paddingRight),
-
+        (width - leftPadding - rightPadding),
     y:
       height -
-      paddingBottom -
+      bottomPadding -
       ((point.value - minimumValue) / valueSpan) *
-        (height - paddingTop - paddingBottom),
-
+        (height - topPadding - bottomPadding),
     value: point.value,
     step: steps[index],
   }));
@@ -896,7 +936,7 @@ function renderMetricChart(name, points, color) {
   const linePoints = coordinates
     .map(
       (coordinate) =>
-        `${coordinate.x.toFixed(1)},${coordinate.y.toFixed(1)}`,
+        `${coordinate.x.toFixed(1)},${coordinate.y.toFixed(1)}`
     )
     .join(" ");
 
@@ -906,13 +946,13 @@ function renderMetricChart(name, points, color) {
 
       const y =
         height -
-        paddingBottom -
-        fraction * (height - paddingTop - paddingBottom);
+        bottomPadding -
+        fraction * (height - topPadding - bottomPadding);
 
       return `
         <line
-          x1="${paddingLeft}"
-          x2="${width - paddingRight}"
+          x1="${leftPadding}"
+          x2="${width - rightPadding}"
           y1="${y}"
           y2="${y}"
           stroke="rgba(109,125,147,.16)"
@@ -920,7 +960,7 @@ function renderMetricChart(name, points, color) {
         />
 
         <text
-          x="${paddingLeft - 8}"
+          x="${leftPadding - 8}"
           y="${y + 3}"
           text-anchor="end"
           font-size="9.5"
@@ -948,7 +988,7 @@ function renderMetricChart(name, points, color) {
             step ${coordinate.step}: ${fmtNum(coordinate.value)}
           </title>
         </circle>
-      `,
+      `
     )
     .join("");
 
@@ -963,7 +1003,7 @@ function renderMetricChart(name, points, color) {
 
       <svg
         viewBox="0 0 ${width} ${height}"
-        style="width:100%;height:${height}px;display:block;"
+        style="width:100%; height:${height}px; display:block;"
       >
         ${yTicks}
 
@@ -999,17 +1039,15 @@ function renderAllMetricCharts(metricsOverTime) {
       renderMetricChart(
         name,
         metricsOverTime[name],
-        METRIC_CHART_COLORS[
-          index % METRIC_CHART_COLORS.length
-        ],
-      ),
+        METRIC_CHART_COLORS[index % METRIC_CHART_COLORS.length]
+      )
     )
     .join("");
 }
 
 function renderSparkline(
   values,
-  color = "var(--signal-mint)",
+  color = "var(--signal-mint)"
 ) {
   if (!values || values.length < 2) {
     return `
@@ -1021,78 +1059,77 @@ function renderSparkline(
 
   const width = 600;
   const height = 210;
-  const paddingX = 10;
-  const paddingY = 22;
+  const horizontalPadding = 10;
+  const verticalPadding = 22;
 
-  const minimum = Math.min(...values);
-  const maximum = Math.max(...values);
+  const minimumValue = Math.min(...values);
+  const maximumValue = Math.max(...values);
 
   const margin = Math.max(
-    (maximum - minimum) * 0.28,
-    Math.abs(maximum || 1) * 0.025,
+    (maximumValue - minimumValue) * 0.28,
+    Math.abs(maximumValue || 1) * 0.025
   );
 
-  const low = minimum - margin;
-  const high = maximum + margin;
-  const span = high - low || 1;
+  const lowerBound = minimumValue - margin;
+  const upperBound = maximumValue + margin;
+  const valueSpan = upperBound - lowerBound || 1;
 
   const coordinates = values.map((value, index) => ({
     x:
-      paddingX +
+      horizontalPadding +
       (index / (values.length - 1)) *
-        (width - paddingX * 2),
-
+        (width - horizontalPadding * 2),
     y:
       height -
-      paddingY -
-      ((value - low) / span) *
-        (height - paddingY * 2),
+      verticalPadding -
+      ((value - lowerBound) / valueSpan) *
+        (height - verticalPadding * 2),
   }));
 
   const points = coordinates
     .map(
       (coordinate) =>
-        `${coordinate.x.toFixed(1)},${coordinate.y.toFixed(1)}`,
+        `${coordinate.x.toFixed(1)},${coordinate.y.toFixed(1)}`
     )
     .join(" ");
 
-  const last = coordinates[coordinates.length - 1];
+  const lastCoordinate = coordinates[coordinates.length - 1];
 
-  const areaPoints =
-    `${paddingX},${height - paddingY} ` +
-    `${points} ` +
-    `${width - paddingX},${height - paddingY}`;
+  const areaPoints = `
+    ${horizontalPadding},${height - verticalPadding}
+    ${points}
+    ${width - horizontalPadding},${height - verticalPadding}
+  `;
 
   const grid = [0.25, 0.5, 0.75]
-    .map(
-      (fraction) => `
+    .map((fraction) => {
+      const y =
+        verticalPadding +
+        (height - verticalPadding * 2) * fraction;
+
+      return `
         <line
-          x1="${paddingX}"
-          x2="${width - paddingX}"
-          y1="${
-            paddingY +
-            (height - paddingY * 2) * fraction
-          }"
-          y2="${
-            paddingY +
-            (height - paddingY * 2) * fraction
-          }"
+          x1="${horizontalPadding}"
+          x2="${width - horizontalPadding}"
+          y1="${y}"
+          y2="${y}"
           stroke="rgba(109,125,147,.20)"
           stroke-width="1"
         />
-      `,
-    )
+      `;
+    })
     .join("");
 
-  const gradientId =
-    `trial-gradient-${Math.random().toString(36).slice(2)}`;
+  const gradientId = `objective-gradient-${Math.random()
+    .toString(36)
+    .slice(2)}`;
 
   return `
     <div class="objective-chart">
       <svg
         viewBox="0 0 ${width} ${height}"
         preserveAspectRatio="none"
-        aria-label="Recorded trial metric"
+        aria-label="Trial objective trend"
       >
         <defs>
           <linearGradient
@@ -1107,6 +1144,7 @@ function renderSparkline(
               stop-color="${color}"
               stop-opacity=".34"
             />
+
             <stop
               offset="1"
               stop-color="${color}"
@@ -1133,8 +1171,8 @@ function renderSparkline(
         />
 
         <circle
-          cx="${last.x}"
-          cy="${last.y}"
+          cx="${lastCoordinate.x}"
+          cy="${lastCoordinate.y}"
           r="6"
           fill="${color}"
           stroke="#0d151d"
@@ -1146,109 +1184,60 @@ function renderSparkline(
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Router
-// -----------------------------------------------------------------------------
+// -------------------- router --------------------
 
 const routes = [
   [/^#\/$/, "overview", renderOverviewScreen],
-
-  [
-    /^#\/projects$/,
-    "projects",
-    renderProjectsScreen,
-  ],
-
+  [/^#\/projects$/, "projects", renderProjectsScreen],
   [
     /^#\/runs$/,
     "runs",
     () =>
       renderGlobalRunsScreen(
-        new URLSearchParams(
-          location.hash.split("?")[1],
-        ),
+        new URLSearchParams(location.hash.split("?")[1])
       ),
   ],
-
-  [
-    /^#\/failures$/,
-    "failures",
-    renderFailuresScreen,
-  ],
-
-  [
-    /^#\/campaigns$/,
-    "campaigns",
-    renderCampaignsScreen,
-  ],
-
-  [
-    /^#\/memory$/,
-    "memory",
-    renderMemoryScreen,
-  ],
-
-  [
-    /^#\/settings$/,
-    "settings",
-    renderSettingsScreen,
-  ],
-
+  [/^#\/failures$/, "failures", renderFailuresScreen],
+  [/^#\/campaigns$/, "campaigns", renderCampaignsScreen],
+  [/^#\/memory$/, "memory", renderMemoryScreen],
+  [/^#\/settings$/, "settings", renderSettingsScreen],
   [
     /^#\/project\/([^/]+)$/,
     "projects",
     (match) =>
-      renderProjectRunsScreen(
-        decodeURIComponent(match[1]),
-      ),
+      renderProjectRunsScreen(decodeURIComponent(match[1])),
   ],
-
   [
     /^#\/run\/([^/]+)$/,
     "runs",
-    (match) =>
-      renderRunScreen(
-        decodeURIComponent(match[1]),
-      ),
+    (match) => renderRunScreen(decodeURIComponent(match[1])),
   ],
-
   [
     /^#\/failure\/([^/]+)$/,
     "failures",
     (match) =>
-      renderFailureScreen(
-        decodeURIComponent(match[1]),
-      ),
+      renderFailureScreen(decodeURIComponent(match[1])),
   ],
-
   [
     /^#\/campaign\/([^/]+)$/,
     "campaigns",
     (match) =>
-      renderCampaignScreen(
-        decodeURIComponent(match[1]),
-      ),
+      renderCampaignScreen(decodeURIComponent(match[1])),
   ],
-
   [
     /^#\/compare$/,
     "runs",
     () =>
       renderCompareScreen(
-        new URLSearchParams(
-          location.hash.split("?")[1],
-        ),
+        new URLSearchParams(location.hash.split("?")[1])
       ),
   ],
-
   [
     /^#\/overlay$/,
     "runs",
     () =>
       renderOverlayScreen(
-        new URLSearchParams(
-          location.hash.split("?")[1],
-        ),
+        new URLSearchParams(location.hash.split("?")[1])
       ),
   ],
 ];
@@ -1263,26 +1252,17 @@ function route() {
   for (const [pattern, navigationKey, handler] of routes) {
     const match = path.match(pattern);
 
-    if (!match) continue;
+    if (match) {
+            updateActiveNav(navigationKey);
 
-    updateActiveNav(navigationKey);
-
-    Promise
-      .resolve(handler(match))
-      .finally(() => {
+      Promise.resolve(handler(match)).finally(() => {
         finishRouteProgress();
-
-        app.focus({
-          preventScroll: true,
-        });
-
-        window.scrollTo({
-          top: 0,
-          behavior: "instant",
-        });
+        app.focus({ preventScroll: true });
+        window.scrollTo({ top: 0, behavior: "instant" });
       });
 
-    return;
+      return;
+    }
   }
 
   app.innerHTML = `
@@ -1296,14 +1276,12 @@ function route() {
 }
 
 function updateActiveNav(navigationKey) {
-  document
-    .querySelectorAll("#sidebar-nav a")
-    .forEach((link) => {
-      link.classList.toggle(
-        "active",
-        link.dataset.route === navigationKey,
-      );
-    });
+  document.querySelectorAll("#sidebar-nav a").forEach((link) => {
+    link.classList.toggle(
+      "active",
+      link.dataset.route === navigationKey
+    );
+  });
 }
 
 window.addEventListener("hashchange", route);
@@ -1313,9 +1291,7 @@ window.addEventListener("DOMContentLoaded", () => {
   route();
 });
 
-// -----------------------------------------------------------------------------
-// Overview
-// -----------------------------------------------------------------------------
+// -------------------- screen: overview --------------------
 
 async function renderOverviewScreen() {
   app.innerHTML = `
@@ -1330,31 +1306,6 @@ async function renderOverviewScreen() {
     app.innerHTML = errorState(error);
     return;
   }
-
-  const attentionRuns = Array.isArray(
-    overview.runs_needing_attention,
-  )
-    ? overview.runs_needing_attention
-    : [];
-
-  const verifiedRecoveries = Array.isArray(
-    overview.recent_verified_fixes,
-  )
-    ? overview.recent_verified_fixes
-    : [];
-
-  const oomFailureCount =
-    firstFinite(overview.oom_failure_count) ??
-    attentionRuns.filter((run) => {
-      const category = String(
-        run.failure_category || run.rule || "",
-      ).toLowerCase();
-
-      return (
-        category.includes("out_of_memory") ||
-        category.includes("oom")
-      );
-    }).length;
 
   if (overview.run_count === 0) {
     app.innerHTML = `
@@ -1372,7 +1323,9 @@ async function renderOverviewScreen() {
     return;
   }
 
-  const attentionRows = attentionRuns
+  const runsNeedingAttention = (
+    overview.runs_needing_attention || []
+  )
     .map(
       (run) => `
         <tr>
@@ -1381,26 +1334,35 @@ async function renderOverviewScreen() {
               ${esc(run.display_name)}
             </a>
           </td>
+
           <td>${esc(run.project)}</td>
           <td>${esc(run.failure_category)}</td>
+
           <td>
             <a href="#/failure/${encodeURIComponent(run.run_id)}">
               investigate &rarr;
             </a>
           </td>
         </tr>
-      `,
+      `
     )
     .join("");
 
-  const verifiedRows = verifiedRecoveries
+  const recentVerifiedRecoveries =
+    overview.recent_verified_recoveries ||
+    overview.recent_verified_fixes ||
+    [];
+
+  const verifiedRecoveryRows = recentVerifiedRecoveries
     .map(
       (campaign) => `
         <tr>
           <td>
-            <a href="#/campaign/${encodeURIComponent(
-              campaign.campaign_id,
-            )}">
+            <a
+              href="#/campaign/${encodeURIComponent(
+                campaign.campaign_id
+              )}"
+            >
               ${esc(campaign.campaign_id)}
             </a>
           </td>
@@ -1408,14 +1370,22 @@ async function renderOverviewScreen() {
           <td>${esc(campaign.project)}</td>
 
           <td>
-            <a href="#/run/${encodeURIComponent(
-              campaign.best_run_id,
-            )}">
-              ${esc(campaign.best_run_id)}
-            </a>
+            ${esc(
+              campaign.verified_candidate_id ||
+                "verified candidate"
+            )}
+          </td>
+
+          <td>
+            ${(campaign.verified_run_ids || []).length}
+            confirmation run${
+              (campaign.verified_run_ids || []).length === 1
+                ? ""
+                : "s"
+            }
           </td>
         </tr>
-      `,
+      `
     )
     .join("");
 
@@ -1442,42 +1412,41 @@ async function renderOverviewScreen() {
         <div class="stat-label">
           Runs needing attention
         </div>
-        <div class="stat-value ${
-          attentionRuns.length ? "red" : ""
-        }">
-          ${attentionRuns.length}
+
+        <div
+          class="stat-value ${
+            (overview.runs_needing_attention || []).length
+              ? "red"
+              : ""
+          }"
+        >
+          ${(overview.runs_needing_attention || []).length}
         </div>
       </div>
 
       <div class="stat-card">
-        <div class="stat-label">
-          Active recovery trials
-        </div>
+        <div class="stat-label">Active campaigns</div>
         <div class="stat-value mint">
-          ${overview.active_campaign_count ?? 0}
+          ${overview.active_campaign_count}
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Verified recoveries</div>
+        <div class="stat-value mint">
+          ${overview.verified_recovery_count || 0}
         </div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">GPU</div>
-        <div
-          class="stat-value"
-          style="font-size:15px;"
-        >
+
+        <div class="stat-value" style="font-size:15px;">
           ${
             overview.gpu_available
               ? esc(overview.gpu_name)
               : "not detected"
           }
-        </div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">OOM failures</div>
-        <div class="stat-value ${
-          oomFailureCount ? "red" : ""
-        }">
-          ${oomFailureCount}
         </div>
       </div>
     </div>
@@ -1488,7 +1457,7 @@ async function renderOverviewScreen() {
       </h2>
 
       ${
-        attentionRows
+        runsNeedingAttention
           ? `
             <table class="runs-table">
               <thead>
@@ -1499,9 +1468,8 @@ async function renderOverviewScreen() {
                   <th></th>
                 </tr>
               </thead>
-              <tbody>
-                ${attentionRows}
-              </tbody>
+
+              <tbody>${runsNeedingAttention}</tbody>
             </table>
           `
           : `
@@ -1519,35 +1487,46 @@ async function renderOverviewScreen() {
       </h2>
 
       ${
-        verifiedRows
+        verifiedRecoveryRows
           ? `
             <table class="runs-table">
               <thead>
                 <tr>
                   <th>campaign</th>
                   <th>project</th>
-                  <th>verified run</th>
+                  <th>candidate</th>
+                  <th>confirmation</th>
                 </tr>
               </thead>
-              <tbody>
-                ${verifiedRows}
-              </tbody>
+
+              <tbody>${verifiedRecoveryRows}</tbody>
             </table>
           `
           : `
             <p class="ai-empty">
-              No recovery campaign has produced a verified
-              recovery yet.
+              No campaign has passed independent confirmation yet.
             </p>
           `
       }
     </div>
+
+    <div class="panel">
+      <h2 class="section-title">
+        Execution boundary
+      </h2>
+
+      <p>
+        Recovery work runs explicitly from the Python SDK or CLI in
+        fresh subprocesses. This browser is a read-only evidence and
+        audit surface.
+      </p>
+
+      <code>watcher recovery CAMPAIGN_ID</code>
+    </div>
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Projects
-// -----------------------------------------------------------------------------
+// -------------------- screen: projects --------------------
 
 async function renderProjectsScreen() {
   app.innerHTML = `
@@ -1595,25 +1574,23 @@ async function renderProjectsScreen() {
                   run${project.run_count === 1 ? "" : "s"}
                 </span>
 
-                <span class="${
-                  project.failure_count
-                    ? "fail-count"
-                    : ""
-                }">
+                <span
+                  class="${
+                    project.failure_count ? "fail-count" : ""
+                  }"
+                >
                   ${project.failure_count} failed
                 </span>
               </div>
             </a>
-          `,
+          `
         )
         .join("")}
     </div>
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Run list
-// -----------------------------------------------------------------------------
+// -------------------- screen: run lists --------------------
 
 async function renderProjectRunsScreen(project) {
   app.innerHTML = `
@@ -1624,7 +1601,7 @@ async function renderProjectRunsScreen(project) {
 
   try {
     runs = await api(
-      `/projects/${encodeURIComponent(project)}/runs`,
+      `/projects/${encodeURIComponent(project)}/runs`
     );
   } catch (error) {
     app.innerHTML = errorState(error);
@@ -1634,16 +1611,17 @@ async function renderProjectRunsScreen(project) {
   renderRunsTable(
     runs,
     `<a href="#/">projects</a> / ${esc(project)}`,
-    project,
+    project
   );
 }
 
-async function renderGlobalRunsScreen(params) {
+async function renderGlobalRunsScreen(parameters) {
   app.innerHTML = `
     <p class="loading">loading runs&hellip;</p>
   `;
 
-  const status = params.get("status") || "";
+  const status = parameters.get("status") || "";
+
   const query = status
     ? `?status=${encodeURIComponent(status)}`
     : "";
@@ -1657,17 +1635,12 @@ async function renderGlobalRunsScreen(params) {
     return;
   }
 
-  renderRunsTable(
-    runs,
-    "watcherml",
-    null,
-    status,
-  );
+  renderRunsTable(runs, "watcherml", null, status);
 }
 
 let runsTableSort = {
   key: null,
-  direction: 1,
+  dir: 1,
 };
 
 const MAX_OVERLAY_RUNS = 6;
@@ -1684,13 +1657,13 @@ function renderRunsTable(
   runs,
   breadcrumbHtml,
   project,
-  currentStatusFilter,
+  currentStatusFilter
 ) {
   const metricNames = [
     ...new Set(
       runs.flatMap((run) =>
-        Object.keys(run.final_metrics || {}),
-      ),
+        Object.keys(run.final_metrics || {})
+      )
     ),
   ].slice(0, 4);
 
@@ -1741,12 +1714,12 @@ function renderRunsTable(
     sortedRuns.sort((left, right) => {
       const leftValue = sortValue(
         left,
-        runsTableSort.key,
+        runsTableSort.key
       );
 
       const rightValue = sortValue(
         right,
-        runsTableSort.key,
+        runsTableSort.key
       );
 
       if (
@@ -1764,11 +1737,11 @@ function renderRunsTable(
       }
 
       if (leftValue < rightValue) {
-        return -1 * runsTableSort.direction;
+        return -1 * runsTableSort.dir;
       }
 
       if (leftValue > rightValue) {
-        return runsTableSort.direction;
+        return runsTableSort.dir;
       }
 
       return 0;
@@ -1779,7 +1752,7 @@ function renderRunsTable(
     const active = runsTableSort.key === key;
 
     const arrow = active
-      ? runsTableSort.direction === 1
+      ? runsTableSort.dir === 1
         ? " &#9650;"
         : " &#9660;"
       : "";
@@ -1809,12 +1782,12 @@ function renderRunsTable(
         ? `
           <div class="compare-picker">
             <span>
-              Select two or more runs to compare or overlay
-              their metrics.
+              Select two or more runs to compare or overlay their
+              metrics:
             </span>
 
             <button id="compare-btn" disabled>
-              Compare selected
+              Compare selected (2)
             </button>
 
             <button id="overlay-btn" disabled>
@@ -1831,18 +1804,20 @@ function renderRunsTable(
           <thead>
             <tr>
               ${project ? "<th></th>" : ""}
-
               ${sortableHeader("run", "display_name")}
               ${sortableHeader("status", "status")}
               ${sortableHeader("started", "started_at")}
-              ${sortableHeader("duration", "duration_seconds")}
+              ${sortableHeader(
+                "duration",
+                "duration_seconds"
+              )}
 
               ${metricNames
                 .map((metric) =>
                   sortableHeader(
                     metric,
-                    `metric:${metric}`,
-                  ),
+                    `metric:${metric}`
+                  )
                 )
                 .join("")}
 
@@ -1871,7 +1846,11 @@ function renderRunsTable(
                     }
 
                     <td>
-                      <a href="#/run/${encodeURIComponent(run.run_id)}">
+                      <a
+                        href="#/run/${encodeURIComponent(
+                          run.run_id
+                        )}"
+                      >
                         <span class="run-name">
                           ${esc(run.display_name)}
                         </span>
@@ -1887,15 +1866,20 @@ function renderRunsTable(
 
                     <td>${badge(run.status)}</td>
                     <td>${fmtTimestamp(run.started_at)}</td>
-                    <td>${fmtDuration(run.duration_seconds)}</td>
+
+                    <td>
+                      ${fmtDuration(run.duration_seconds)}
+                    </td>
 
                     ${metricNames
                       .map(
                         (metric) => `
                           <td>
-                            ${fmtNum(run.final_metrics[metric])}
+                            ${fmtNum(
+                              run.final_metrics[metric]
+                            )}
                           </td>
-                        `,
+                        `
                       )
                       .join("")}
 
@@ -1905,7 +1889,9 @@ function renderRunsTable(
                       ${
                         run.warning_count > 0
                           ? `
-                            <span style="color:var(--signal-amber)">
+                            <span
+                              style="color:var(--signal-amber)"
+                            >
                               ${run.warning_count}
                             </span>
                           `
@@ -1913,7 +1899,7 @@ function renderRunsTable(
                       }
                     </td>
                   </tr>
-                `,
+                `
               )
               .join("")}
           </tbody>
@@ -1924,13 +1910,13 @@ function renderRunsTable(
 
   document
     .querySelectorAll(".sortable-th")
-    .forEach((header) => {
-      header.addEventListener("click", () => {
-        const key = header.dataset.sortKey;
+    .forEach((tableHeader) => {
+      tableHeader.addEventListener("click", () => {
+        const key = tableHeader.dataset.sortKey;
 
-        runsTableSort.direction =
+        runsTableSort.dir =
           runsTableSort.key === key
-            ? -runsTableSort.direction
+            ? -runsTableSort.dir
             : 1;
 
         runsTableSort.key = key;
@@ -1939,65 +1925,61 @@ function renderRunsTable(
           runs,
           breadcrumbHtml,
           project,
-          currentStatusFilter,
+          currentStatusFilter
         );
       });
     });
 
-  if (!project) return;
+  if (project) {
+    const checkboxes = [
+      ...document.querySelectorAll(".compare-check"),
+    ];
 
-  const checkboxes = [
-    ...document.querySelectorAll(".compare-check"),
-  ];
+    const compareButton =
+      document.getElementById("compare-btn");
 
-  const compareButton =
-    document.getElementById("compare-btn");
+    const overlayButton =
+      document.getElementById("overlay-btn");
 
-  const overlayButton =
-    document.getElementById("overlay-btn");
+    checkboxes.forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        const checked = checkboxes.filter(
+          (item) => item.checked
+        );
 
-  checkboxes.forEach((checkbox) => {
-    checkbox.addEventListener("change", () => {
-      const checked = checkboxes.filter(
-        (candidate) => candidate.checked,
-      );
+        if (checked.length > MAX_OVERLAY_RUNS) {
+          checkbox.checked = false;
+          return;
+        }
 
-      if (checked.length > MAX_OVERLAY_RUNS) {
-        checkbox.checked = false;
-        return;
-      }
-
-      compareButton.disabled = checked.length !== 2;
-      overlayButton.disabled = checked.length < 2;
+        compareButton.disabled = checked.length !== 2;
+        overlayButton.disabled = checked.length < 2;
+      });
     });
-  });
 
-  compareButton.addEventListener("click", () => {
-    const [firstRun, secondRun] = checkboxes
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => checkbox.value);
+    compareButton.addEventListener("click", () => {
+      const [firstRun, secondRun] = checkboxes
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.value);
 
-    location.hash =
-      `#/compare?a=${encodeURIComponent(firstRun)}` +
-      `&b=${encodeURIComponent(secondRun)}`;
-  });
+      location.hash =
+        `#/compare?a=${encodeURIComponent(firstRun)}` +
+        `&b=${encodeURIComponent(secondRun)}`;
+    });
 
-  overlayButton.addEventListener("click", () => {
-    const runIds = checkboxes
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => checkbox.value);
+    overlayButton.addEventListener("click", () => {
+      const runIds = checkboxes
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.value);
 
-    location.hash =
-      "#/overlay?ids=" +
-      runIds
+      location.hash = `#/overlay?ids=${runIds
         .map(encodeURIComponent)
-        .join(",");
-  });
+        .join(",")}`;
+    });
+  }
 }
 
-// -----------------------------------------------------------------------------
-// Run detail
-// -----------------------------------------------------------------------------
+// -------------------- screen: run detail --------------------
 
 async function renderRunScreen(runId) {
   app.innerHTML = `
@@ -2017,53 +1999,52 @@ async function renderRunScreen(runId) {
     return;
   }
 
-  renderRunScreenContent(
-    runId,
-    run,
-    samples,
-  );
+  renderRunScreenContent(runId, run, samples);
 
   const MAX_LIVE_POLLS = 200;
   let pollCount = 0;
 
-  if (run.status !== "running") return;
+  if (run.status === "running") {
+    activePollTimer = setInterval(async () => {
+      pollCount += 1;
 
-  activePollTimer = setInterval(async () => {
-    pollCount += 1;
+      if (pollCount > MAX_LIVE_POLLS) {
+        stopActivePoll();
+        return;
+      }
 
-    if (pollCount > MAX_LIVE_POLLS) {
-      stopActivePoll();
-      return;
-    }
+      let updatedRun;
+      let updatedSamples;
 
-    let freshRun;
-    let freshSamples;
+      try {
+        [updatedRun, updatedSamples] =
+          await Promise.all([
+            api(`/runs/${encodeURIComponent(runId)}`),
+            api(
+              `/runs/${encodeURIComponent(runId)}/samples`
+            ),
+          ]);
+      } catch (_) {
+        return;
+      }
 
-    try {
-      [freshRun, freshSamples] = await Promise.all([
-        api(`/runs/${encodeURIComponent(runId)}`),
-        api(`/runs/${encodeURIComponent(runId)}/samples`),
-      ]);
-    } catch (_) {
-      return;
-    }
+      renderRunScreenContent(
+        runId,
+        updatedRun,
+        updatedSamples
+      );
 
-    renderRunScreenContent(
-      runId,
-      freshRun,
-      freshSamples,
-    );
-
-    if (freshRun.status !== "running") {
-      stopActivePoll();
-    }
-  }, 3000);
+      if (updatedRun.status !== "running") {
+        stopActivePoll();
+      }
+    }, 3000);
+  }
 }
 
 function renderRunScreenContent(
   runId,
   run,
-  samples,
+  samples
 ) {
   const configRows =
     Object.entries(run.config || {})
@@ -2071,10 +2052,15 @@ function renderRunScreenContent(
       .map(
         ([key, value]) => `
           <div class="field">
-            <span class="field-label">${esc(key)}</span>
-            <span class="field-value">${esc(value)}</span>
+            <span class="field-label">
+              ${esc(key)}
+            </span>
+
+            <span class="field-value">
+              ${esc(value)}
+            </span>
           </div>
-        `,
+        `
       )
       .join("") ||
     `<p class="ai-empty">no config recorded</p>`;
@@ -2085,7 +2071,9 @@ function renderRunScreenContent(
         <p class="eyebrow">this run failed</p>
 
         <a href="#/failure/${encodeURIComponent(runId)}">
-          <strong>View failure capsule &rarr;</strong>
+          <strong>
+            View failure capsule &rarr;
+          </strong>
         </a>
       </div>
     `
@@ -2099,7 +2087,9 @@ function renderRunScreenContent(
         <ul class="warning-list">
           ${run.warnings
             .map(
-              (warning) => `<li>${esc(warning)}</li>`,
+              (warning) => `
+                <li>${esc(warning)}</li>
+              `
             )
             .join("")}
         </ul>
@@ -2121,33 +2111,31 @@ function renderRunScreenContent(
       `
       : "";
 
-  const captureCompleteness = firstFinite(
-    run.capture_completeness,
-  );
-
-  const capsuleSchema =
-    run.capsule_schema_version ||
-    run.schema_version ||
-    "v1";
-
   app.innerHTML = `
     <p class="eyebrow">
       <a href="#/">projects</a>
       /
-      <a href="#/project/${encodeURIComponent(run.project)}">
+      <a
+        href="#/project/${encodeURIComponent(run.project)}"
+      >
         ${esc(run.project)}
       </a>
       / run
     </p>
 
     <h1 class="page-title">
-      <span id="run-title">${esc(run.display_name)}</span>
+      <span id="run-title">
+        ${esc(run.display_name)}
+      </span>
+
       ${badge(run.status)}
       ${demoBadge(run.simulated)}
       ${resolvedBadge(run.resolved)}
     </h1>
 
-    <p class="page-subtitle">${esc(run.run_id)}</p>
+    <p class="page-subtitle">
+      ${esc(run.run_id)}
+    </p>
 
     <div style="margin-bottom:16px;">
       ${tagPills(run.tags)}
@@ -2156,21 +2144,19 @@ function renderRunScreenContent(
     <div class="action-bar">
       <button id="rename-btn">Rename</button>
 
-      <a href="/api/runs/${encodeURIComponent(runId)}/export">
+      <a
+        href="/api/runs/${encodeURIComponent(runId)}/export"
+      >
         <button>Export capsule</button>
       </a>
 
-      <a href="/api/runs/${encodeURIComponent(runId)}/metrics.csv">
+      <a
+        href="/api/runs/${encodeURIComponent(
+          runId
+        )}/metrics.csv"
+      >
         <button>Export metrics (CSV)</button>
       </a>
-
-      <button id="resolve-btn">
-        ${
-          run.resolved
-            ? "Mark unresolved"
-            : "Mark as resolved"
-        }
-      </button>
     </div>
 
     ${failureLink}
@@ -2195,8 +2181,7 @@ function renderRunScreenContent(
 
       <div class="panel">
         <h2 class="section-title">
-          Failure-capture context
-          ${provenance("captured")}
+          Reproduction
         </h2>
 
         <div class="field">
@@ -2230,21 +2215,13 @@ function renderRunScreenContent(
 
         <div class="field">
           <span class="field-label">
-            capsule_schema
-          </span>
-          <span class="field-value">
-            ${esc(capsuleSchema)}
-          </span>
-        </div>
-
-        <div class="field">
-          <span class="field-label">
-            capture_completeness
+            reproduction_score
           </span>
           <span class="field-value">
             ${
-              captureCompleteness !== null
-                ? `${fmtNum(captureCompleteness)}/10`
+              run.reproduction_score !== null &&
+              run.reproduction_score !== undefined
+                ? `${run.reproduction_score}/10`
                 : "&mdash;"
             }
           </span>
@@ -2267,10 +2244,12 @@ function renderRunScreenContent(
         "Rename this run:",
         run.display_name === run.run_id
           ? ""
-          : run.display_name,
+          : run.display_name
       );
 
-      if (nextName === null) return;
+      if (nextName === null) {
+        return;
+      }
 
       await api(
         `/runs/${encodeURIComponent(runId)}`,
@@ -2282,47 +2261,10 @@ function renderRunScreenContent(
           body: JSON.stringify({
             display_name: nextName || null,
           }),
-        },
+        }
       );
 
       notify("Run name updated");
-      stopActivePoll();
-      renderRunScreen(runId);
-    });
-
-  document
-    .getElementById("resolve-btn")
-    .addEventListener("click", async () => {
-      let note = null;
-
-      if (!run.resolved) {
-        note =
-          prompt(
-            "Resolution note (optional):",
-            "",
-          ) || null;
-      }
-
-      await api(
-        `/runs/${encodeURIComponent(runId)}`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            resolved: !run.resolved,
-            resolved_note: note,
-          }),
-        },
-      );
-
-      notify(
-        run.resolved
-          ? "Run marked unresolved"
-          : "Run marked resolved",
-      );
-
       stopActivePoll();
       renderRunScreen(runId);
     });
@@ -2331,201 +2273,139 @@ function renderRunScreenContent(
 function buildTimeline(run) {
   const items = [
     {
-      timestamp: run.started_at,
+      t: run.started_at,
       label: "Run started",
-      className: "",
+      cls: "",
     },
   ];
 
   for (const warning of run.warnings || []) {
     items.push({
-      timestamp: run.started_at,
+      t: run.started_at,
       label: `Warning: ${warning}`,
-      className: "warning",
+      cls: "warning",
     });
   }
 
   if (run.has_failure) {
     items.push({
-      timestamp: run.ended_at,
+      t: run.ended_at,
       label: "Run failed",
-      className: "failure",
+      cls: "failure",
     });
   } else if (run.ended_at) {
     items.push({
-      timestamp: run.ended_at,
+      t: run.ended_at,
       label: "Run completed",
-      className: "",
+      cls: "",
     });
   }
 
   items.sort(
-    (left, right) =>
-      (left.timestamp || 0) -
-      (right.timestamp || 0),
+    (left, right) => (left.t || 0) - (right.t || 0)
   );
 
   return (
     items
       .map(
         (item) => `
-          <div class="timeline-item ${item.className}">
+          <div class="timeline-item ${item.cls}">
             <div class="timeline-time">
-              ${fmtTimestamp(item.timestamp)}
+              ${fmtTimestamp(item.t)}
             </div>
 
             <div class="timeline-label">
               ${esc(item.label)}
             </div>
           </div>
-        `,
+        `
       )
       .join("") ||
-    `<p class="ai-empty">No timeline events recorded.</p>`
+    `
+      <p class="ai-empty">
+        No timeline events recorded.
+      </p>
+    `
   );
 }
 
-// -----------------------------------------------------------------------------
-// Failure capsule
-// -----------------------------------------------------------------------------
+// -------------------- screen: failure capsule --------------------
 
 async function renderFailureScreen(runId) {
   app.innerHTML = `
-    <p class="loading">loading failure capsule&hellip;</p>
+    <p class="loading">
+      loading failure capsule&hellip;
+    </p>
   `;
 
   let failure;
 
   try {
     failure = await api(
-      `/runs/${encodeURIComponent(runId)}/failure`,
+      `/runs/${encodeURIComponent(runId)}/failure`
     );
   } catch (error) {
     app.innerHTML = errorState(error);
     return;
   }
 
-  const diagnosis =
-    failure.classification ||
-    failure.diagnosis ||
-    {};
+  const diagnosis = failure.diagnosis || {};
 
-  const failureRule =
+  const failureClass =
+    failure.failure_class ||
     diagnosis.rule ||
-    diagnosis.failure_class ||
-    diagnosis.category ||
     "unclassified";
 
-  const actions = (diagnosis.suggested_actions || [])
-    .map((action) => `<li>${esc(action)}</li>`)
-    .join("");
-
-  const proposedInterventions = (
-    failure.proposed_interventions || []
+  const suggestedActions = (
+    diagnosis.suggested_actions || []
   )
-    .map((intervention, index) => {
-      const patch =
-        intervention.patch ||
-        intervention.config_patch ||
-        {};
-
-      const label =
-        intervention.label ||
-        intervention.name ||
-        `intervention ${index + 1}`;
-
-      const rationale =
-        intervention.rationale ||
-        intervention.reason ||
-        "bounded policy proposal";
-
-      return `
-        <div class="checklist-row">
-          <strong>${esc(label)}:</strong>
-          ${esc(formatPatch(patch))}
-          <br />
-          <span class="text-muted">
-            ${esc(rationale)}
-          </span>
-        </div>
-      `;
-    })
+    .map((action) => `<li>${esc(action)}</li>`)
     .join("");
 
   const evidenceIndex = {};
 
-  (failure.evidence_index || []).forEach((entry) => {
-    evidenceIndex[entry.id] = entry.label;
+  (failure.evidence_index || []).forEach((evidence) => {
+    evidenceIndex[evidence.id] = evidence.label;
   });
 
   const evidenceChips = (
     diagnosis.evidence_ids || []
   )
     .map(
-      (id) => `
+      (evidenceId) => `
         <span
           class="evidence-chip"
-          title="${esc(evidenceIndex[id] || "")}"
+          title="${esc(
+            evidenceIndex[evidenceId] || ""
+          )}"
         >
-          ${esc(id)}
+          ${esc(evidenceId)}
         </span>
-      `,
+      `
     )
     .join("");
 
-  const evidence = failure.evidence || {};
+  const recentMetrics = (
+    failure.evidence?.recent_metrics || []
+  )
+    .map(
+      (metric) => `
+        <div class="field">
+          <span class="field-label">
+            ${esc(metric.name)}
+            (step ${metric.step})
+          </span>
 
-  const recentMetrics =
-    (evidence.recent_metrics || [])
-      .map(
-        (metric) => `
-          <div class="field">
-            <span class="field-label">
-              ${esc(metric.name)} (step ${metric.step})
-            </span>
-            <span class="field-value">
-              ${fmtNum(metric.value)}
-            </span>
-          </div>
-        `,
-      )
-      .join("") ||
+          <span class="field-value">
+            ${fmtNum(metric.value)}
+          </span>
+        </div>
+      `
+    )
+    .join("") ||
     `
       <p class="ai-empty">
         no metrics logged before failure
-      </p>
-    `;
-
-  const evidenceFields =
-    Object.entries(evidence)
-      .filter(
-        ([key, value]) =>
-          key !== "recent_metrics" &&
-          value !== null &&
-          value !== undefined,
-      )
-      .slice(0, 16)
-      .map(([key, value]) => {
-        const rendered =
-          typeof value === "object"
-            ? JSON.stringify(value)
-            : value;
-
-        return `
-          <div class="field">
-            <span class="field-label">
-              ${esc(key)}
-            </span>
-            <span class="field-value">
-              ${esc(rendered)}
-            </span>
-          </div>
-        `;
-      })
-      .join("") ||
-    `
-      <p class="ai-empty">
-        no structured runtime evidence recorded
       </p>
     `;
 
@@ -2535,22 +2415,25 @@ async function renderFailureScreen(runId) {
     .map(
       (similarFailure) => `
         <li>
-          <a href="#/failure/${encodeURIComponent(
-            similarFailure.run_id,
-          )}">
+          <a
+            href="#/failure/${encodeURIComponent(
+              similarFailure.run_id
+            )}"
+          >
             ${esc(similarFailure.run_id)}
           </a>
+
           &mdash;
+
           ${esc(
-            (similarFailure.message || "").slice(0, 80),
+            (similarFailure.message || "").slice(0, 80)
           )}
         </li>
-      `,
+      `
     )
     .join("");
 
   const comparison =
-    failure.nearest_successful_run ||
     failure.comparison_to_last_success;
 
   let comparisonHtml = `
@@ -2560,65 +2443,66 @@ async function renderFailureScreen(runId) {
   `;
 
   if (comparison) {
-    const checklist = (comparison.checklist || [])
+    const checklist = (
+      comparison.checklist || []
+    )
       .map(
-        (item) => `
+        (check) => `
           <div class="checklist-row">
-            <span class="${
-              item.matched
-                ? "check-yes"
-                : "check-no"
-            }">
-              ${item.matched ? "&check;" : "&times;"}
+            <span
+              class="${
+                check.matched
+                  ? "check-yes"
+                  : "check-no"
+              }"
+            >
+              ${
+                check.matched
+                  ? "&check;"
+                  : "&times;"
+              }
             </span>
 
-            ${esc(item.label)}
+            ${esc(check.label)}
           </div>
-        `,
+        `
       )
       .join("");
-
-    const similarity = firstFinite(
-      comparison.similarity_score,
-      comparison.similarity,
-    );
 
     comparisonHtml = `
       <p>
         Nearest successful run:
-        <a href="#/run/${encodeURIComponent(comparison.run_id)}">
+
+        <a
+          href="#/run/${encodeURIComponent(
+            comparison.run_id
+          )}"
+        >
           ${esc(comparison.run_id)}
         </a>
 
-        ${
-          similarity !== null
-            ? `&mdash; similarity ${(similarity * 100).toFixed(0)}%`
-            : ""
-        }
+        &mdash;
+
+        similarity
+        ${(
+          comparison.similarity_score * 100
+        ).toFixed(0)}%
       </p>
 
       ${checklist}
 
       <a
-        href="#/compare?a=${encodeURIComponent(runId)}&b=${encodeURIComponent(
-          comparison.run_id,
+        href="#/compare?a=${encodeURIComponent(
+          runId
+        )}&b=${encodeURIComponent(
+          comparison.run_id
         )}"
       >
         Full comparison &rarr;
       </a>
     `;
   }
-
-  const schemaVersion =
-    failure.capsule_schema_version ||
-    failure.schema_version ||
-    "v1";
-
-  const recoveryCommand =
-    `watcher recover ${runId} ` +
-    "--entrypoint train_trial:run";
-
-  app.innerHTML = `
+    app.innerHTML = `
     <p class="eyebrow">
       <a href="#/run/${encodeURIComponent(runId)}">
         ${esc(failure.display_name)}
@@ -2628,8 +2512,7 @@ async function renderFailureScreen(runId) {
 
     <div class="failure-banner">
       <p class="eyebrow">
-        ${esc(failureRule)}
-        ${provenance("rule-based")}
+        ${esc(failureClass)}
         ${demoBadge(failure.simulated)}
         ${resolvedBadge(failure.resolved)}
       </p>
@@ -2652,9 +2535,9 @@ async function renderFailureScreen(runId) {
           ? `
             <a
               href="#/compare?a=${encodeURIComponent(
-                runId,
+                runId
               )}&b=${encodeURIComponent(
-                comparison.run_id,
+                comparison.run_id
               )}"
             >
               <button>Compare baseline</button>
@@ -2663,30 +2546,26 @@ async function renderFailureScreen(runId) {
           : ""
       }
 
-      <button
-        data-copy="${esc(recoveryCommand)}"
-        data-copy-label="Recovery command copied"
+      <a
+        href="/api/runs/${encodeURIComponent(runId)}/export"
       >
-        Copy recovery command
-      </button>
-
-      <a href="/api/runs/${encodeURIComponent(runId)}/export">
         <button>Export capsule</button>
       </a>
 
-      <button id="resolve-btn">
-        ${
-          failure.resolved
-            ? "Mark unresolved"
-            : "Mark as resolved"
-        }
+      <button
+        data-copy="watcher prepare-recovery ${esc(
+          runId
+        )} --entrypoint train:main --out recovery-plan.json"
+        data-copy-label="Preparation command copied"
+      >
+        Copy recovery command
       </button>
     </div>
 
     <div class="panel-grid">
       <div class="panel">
         <h2 class="section-title">
-          OOM classification
+          Diagnosis
           ${provenance("rule-based")}
         </h2>
 
@@ -2704,17 +2583,6 @@ async function renderFailureScreen(runId) {
         }
 
         ${
-          diagnosis.confidence !== undefined
-            ? `
-              <p>
-                <strong>Rule confidence:</strong>
-                ${esc(diagnosis.confidence)}
-              </p>
-            `
-            : ""
-        }
-
-        ${
           evidenceChips
             ? `
               <div class="evidence-row">
@@ -2725,47 +2593,18 @@ async function renderFailureScreen(runId) {
         }
 
         ${
-          actions
+          suggestedActions
             ? `
               <ul class="suggested-actions">
-                ${actions}
+                ${suggestedActions}
               </ul>
             `
             : ""
-        }
-
-        <h2
-          class="section-title"
-          style="margin-top:16px;"
-        >
-          Proposed bounded interventions
-          ${provenance("policy")}
-        </h2>
-
-        ${
-          proposedInterventions ||
-          `
-            <p class="ai-empty">
-              No intervention proposal has been recorded.
-              The exported capsule remains usable evidence;
-              no automatic change was made.
-            </p>
-          `
         }
       </div>
 
       <div class="panel">
         <h2 class="section-title">
-          Runtime evidence
-          ${provenance("captured")}
-        </h2>
-
-        ${evidenceFields}
-
-        <h2
-          class="section-title"
-          style="margin-top:16px;"
-        >
           Recent metrics before failure
         </h2>
 
@@ -2785,7 +2624,9 @@ async function renderFailureScreen(runId) {
                 ${similarFailures}
               </ul>
             `
-            : `<p class="ai-empty">none recorded</p>`
+            : `
+              <p class="ai-empty">none recorded</p>
+            `
         }
 
         <h2
@@ -2802,89 +2643,49 @@ async function renderFailureScreen(runId) {
 
     <div class="panel">
       <h2 class="section-title">
-        Verification boundary
-        ${provenance("captured")}
+        Prepare bounded recovery
+        ${provenance("deterministic")}
       </h2>
 
       <p>
-        A proposed change is not a fix. WatcherML marks
-        recovery as verified only after the original OOM
-        is reproduced as a control and the bounded
-        intervention passes fresh-process confirmation trials.
+        The zero-compute preparation step seals the failure
+        evidence, entrypoint identity, contract, capabilities,
+        and policy-filtered proposals before any GPU trial starts.
       </p>
 
-      <div class="field">
-        <span class="field-label">capsule schema</span>
-        <span class="field-value">
-          ${esc(schemaVersion)}
-        </span>
-      </div>
+      <pre class="traceback"><code>watcher prepare-recovery ${esc(
+        runId
+      )} --entrypoint train:main --out recovery-plan.json
+watcher recover --plan recovery-plan.json</code></pre>
 
-      <div class="field">
-        <span class="field-label">next command</span>
-        <span class="field-value">
-          <code>${esc(recoveryCommand)}</code>
-        </span>
-      </div>
+      <p class="page-subtitle">
+        Replace <code>train:main</code> with your importable
+        training callable. The web UI never starts GPU work or
+        approves interventions.
+      </p>
     </div>
 
     <div class="panel">
       <h2 class="section-title">Full traceback</h2>
+
       <div class="traceback">
         ${esc(failure.traceback)}
       </div>
     </div>
   `;
-
-  document
-    .getElementById("resolve-btn")
-    .addEventListener("click", async () => {
-      let note = null;
-
-      if (!failure.resolved) {
-        note =
-          prompt(
-            "Resolution note (optional):",
-            "",
-          ) || null;
-      }
-
-      await api(
-        `/runs/${encodeURIComponent(runId)}`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            resolved: !failure.resolved,
-            resolved_note: note,
-          }),
-        },
-      );
-
-      notify(
-        failure.resolved
-          ? "Failure marked unresolved"
-          : "Failure marked resolved",
-      );
-
-      renderFailureScreen(runId);
-    });
 }
 
-// -----------------------------------------------------------------------------
-// Run comparison
-// -----------------------------------------------------------------------------
+// -------------------- screen: compare --------------------
 
-async function renderCompareScreen(params) {
-  const firstRunId = params.get("a");
-  const secondRunId = params.get("b");
+async function renderCompareScreen(parameters) {
+  const firstRunId = parameters.get("a");
+  const secondRunId = parameters.get("b");
 
   if (!firstRunId || !secondRunId) {
     app.innerHTML = `
       <div class="empty-state">
         <p class="eyebrow">missing runs</p>
+
         <p>
           Select two runs from a project page to compare.
         </p>
@@ -2898,12 +2699,13 @@ async function renderCompareScreen(params) {
     <p class="loading">comparing runs&hellip;</p>
   `;
 
-  let difference;
+  let comparison;
 
   try {
-    difference = await api(
-      `/compare?a=${encodeURIComponent(firstRunId)}` +
-      `&b=${encodeURIComponent(secondRunId)}`,
+    comparison = await api(
+      `/compare?a=${encodeURIComponent(
+        firstRunId
+      )}&b=${encodeURIComponent(secondRunId)}`
     );
   } catch (error) {
     app.innerHTML = errorState(error);
@@ -2911,18 +2713,20 @@ async function renderCompareScreen(params) {
   }
 
   const configRows =
-    (difference.config_diff || [])
+    (comparison.config_diff || [])
       .map((change) =>
         diffRow(
           change.key,
           change.from,
-          change.to,
-        ),
+          change.to
+        )
       )
       .join("") ||
     `<p class="ai-empty">no config changes</p>`;
 
-  const metricRows = (difference.metric_diff || [])
+  const metricRows = (
+    comparison.metric_diff || []
+  )
     .map((metric) => {
       const deltaClass =
         metric.delta === undefined
@@ -2931,9 +2735,11 @@ async function renderCompareScreen(params) {
             ? "diff-delta-up"
             : "diff-delta-down";
 
-      const delta =
+      const deltaText =
         metric.delta !== undefined
-          ? ` (${metric.delta >= 0 ? "+" : ""}${fmtNum(metric.delta)})`
+          ? ` (${
+              metric.delta >= 0 ? "+" : ""
+            }${fmtNum(metric.delta)})`
           : "";
 
       return `
@@ -2950,8 +2756,9 @@ async function renderCompareScreen(params) {
 
           <span class="diff-to ${deltaClass}">
             ${fmtNum(metric.to)}
+
             <span class="${deltaClass}">
-              ${esc(delta)}
+              ${esc(deltaText)}
             </span>
           </span>
         </div>
@@ -2959,40 +2766,40 @@ async function renderCompareScreen(params) {
     })
     .join("");
 
-  const packageDiff =
-    difference.package_diff || [];
+  const packageChanges =
+    comparison.package_diff || [];
 
-  const packageRows = packageDiff
+  const packageRows = packageChanges
     .slice(0, 15)
     .map((change) =>
       diffRow(
         change.package,
         change.from,
-        change.to,
-      ),
+        change.to
+      )
     )
     .join("");
 
-  const packageSection = packageDiff.length
+  const packageSection = packageChanges.length
     ? `
       <h2
         class="section-title"
         style="margin-top:16px;"
       >
-        Package changes (${packageDiff.length})
+        Package changes (${packageChanges.length})
       </h2>
 
       ${packageRows}
     `
     : "";
 
-  const gitDifference = difference.git_diff || {};
-
   app.innerHTML = `
     <p class="eyebrow">compare</p>
 
     <h1 class="page-title">
-      ${esc(firstRunId)} &rarr; ${esc(secondRunId)}
+      ${esc(firstRunId)}
+      &rarr;
+      ${esc(secondRunId)}
     </h1>
 
     <div class="panel">
@@ -3001,7 +2808,7 @@ async function renderCompareScreen(params) {
       ${configRows}
 
       ${
-        difference.dataset_changed
+        comparison.dataset_changed
           ? `
             <div class="diff-row">
               <span class="diff-key">dataset</span>
@@ -3022,11 +2829,15 @@ async function renderCompareScreen(params) {
       }
 
       ${
-        gitDifference.commit_changed
+        comparison.git_diff?.commit_changed
           ? diffRow(
               "git commit",
-              (gitDifference.commit_a || "").slice(0, 10),
-              (gitDifference.commit_b || "").slice(0, 10),
+              (
+                comparison.git_diff.commit_a || ""
+              ).slice(0, 10),
+              (
+                comparison.git_diff.commit_b || ""
+              ).slice(0, 10)
             )
           : ""
       }
@@ -3041,17 +2852,26 @@ async function renderCompareScreen(params) {
 
       ${
         metricRows ||
-        `<p class="ai-empty">no metrics to compare</p>`
+        `
+          <p class="ai-empty">
+            no metrics to compare
+          </p>
+        `
       }
 
       <div class="diff-row">
-        <span class="diff-key">exit status</span>
-        <span class="diff-from">
-          ${badge(difference.exit_status_a)}
+        <span class="diff-key">
+          exit status
         </span>
+
+        <span class="diff-from">
+          ${badge(comparison.exit_status_a)}
+        </span>
+
         <span class="diff-arrow">&rarr;</span>
+
         <span class="diff-to">
-          ${badge(difference.exit_status_b)}
+          ${badge(comparison.exit_status_b)}
         </span>
       </div>
     </div>
@@ -3059,33 +2879,41 @@ async function renderCompareScreen(params) {
     <div class="panel">
       <h2 class="section-title">
         Interpretation boundary
-        ${provenance("calculated")}
       </h2>
 
       <p>
-        This view reports recorded differences only.
-        Correlation between a changed configuration value
-        and an outcome is not proof of causation. Use a
-        fresh-process controlled trial to verify an intervention.
+        This view reports recorded configuration, package,
+        dataset, git, metric, and exit-status differences.
+        It does not invent a causal explanation. Recovery
+        candidates are generated separately by the bounded
+        OOM policy and must survive isolated trials and
+        independent confirmation.
       </p>
     </div>
   `;
 }
 
-function diffRow(key, from, to) {
+function diffRow(key, fromValue, toValue) {
   return `
     <div class="diff-row">
-      <span class="diff-key">${esc(key)}</span>
-      <span class="diff-from">${esc(from)}</span>
+      <span class="diff-key">
+        ${esc(key)}
+      </span>
+
+      <span class="diff-from">
+        ${esc(fromValue)}
+      </span>
+
       <span class="diff-arrow">&rarr;</span>
-      <span class="diff-to">${esc(to)}</span>
+
+      <span class="diff-to">
+        ${esc(toValue)}
+      </span>
     </div>
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Multi-run metric overlay
-// -----------------------------------------------------------------------------
+// -------------------- multi-run metric overlay --------------------
 
 const OVERLAY_COLORS = [
   "var(--signal-mint)",
@@ -3096,10 +2924,10 @@ const OVERLAY_COLORS = [
   "#fb923c",
 ];
 
-async function renderOverlayScreen(params) {
-  const idsParameter = params.get("ids") || "";
+async function renderOverlayScreen(parameters) {
+  const encodedIds = parameters.get("ids") || "";
 
-  const runIds = idsParameter
+  const runIds = encodedIds
     .split(",")
     .filter(Boolean);
 
@@ -3111,8 +2939,8 @@ async function renderOverlayScreen(params) {
         </p>
 
         <p>
-          Go to a project's run list, select two or more
-          runs, then click "Overlay metrics."
+          Go to a project run list, check two or more
+          runs, and select “Overlay metrics.”
         </p>
       </div>
     `;
@@ -3131,8 +2959,8 @@ async function renderOverlayScreen(params) {
   try {
     runs = await Promise.all(
       runIds.map((runId) =>
-        api(`/runs/${encodeURIComponent(runId)}`),
-      ),
+        api(`/runs/${encodeURIComponent(runId)}`)
+      )
     );
   } catch (error) {
     app.innerHTML = errorState(error);
@@ -3142,8 +2970,8 @@ async function renderOverlayScreen(params) {
   const metricNames = [
     ...new Set(
       runs.flatMap((run) =>
-        Object.keys(run.metrics_over_time || {}),
-      ),
+        Object.keys(run.metrics_over_time || {})
+      )
     ),
   ];
 
@@ -3161,18 +2989,24 @@ async function renderOverlayScreen(params) {
           (run, index) => `
             <span>
               <i
-                style="background:${
-                  OVERLAY_COLORS[
-                    index % OVERLAY_COLORS.length
-                  ]
-                }"
+                style="
+                  background:${
+                    OVERLAY_COLORS[
+                      index % OVERLAY_COLORS.length
+                    ]
+                  }
+                "
               ></i>
 
-              <a href="#/run/${encodeURIComponent(run.run_id)}">
+              <a
+                href="#/run/${encodeURIComponent(
+                  run.run_id
+                )}"
+              >
                 ${esc(run.display_name)}
               </a>
             </span>
-          `,
+          `
         )
         .join("")}
     </div>
@@ -3182,15 +3016,12 @@ async function renderOverlayScreen(params) {
         metricNames.length
           ? metricNames
               .map((metricName) =>
-                renderOverlayChart(
-                  metricName,
-                  runs,
-                ),
+                renderOverlayChart(metricName, runs)
               )
               .join("")
           : `
             <p class="ai-empty">
-              None of the selected runs has logged
+              None of the selected runs have logged
               step-wise metrics.
             </p>
           `
@@ -3206,14 +3037,10 @@ function renderOverlayChart(metricName, runs) {
         OVERLAY_COLORS[
           index % OVERLAY_COLORS.length
         ],
-
       points:
-        (
-          run.metrics_over_time &&
-          run.metrics_over_time[metricName]
-        ) || [],
+        run.metrics_over_time?.[metricName] || [],
     }))
-    .filter((entry) => entry.points.length > 0);
+    .filter((item) => item.points.length > 0);
 
   if (!series.length) {
     return `
@@ -3224,12 +3051,12 @@ function renderOverlayChart(metricName, runs) {
     `;
   }
 
-  const allValues = series.flatMap((entry) =>
-    entry.points.map((point) => point.value),
+  const allValues = series.flatMap((item) =>
+    item.points.map((point) => point.value)
   );
 
-  const allSteps = series.flatMap((entry) =>
-    entry.points.map((point) => point.step ?? 0),
+  const allSteps = series.flatMap((item) =>
+    item.points.map((point) => point.step ?? 0)
   );
 
   const minimumValue = Math.min(...allValues);
@@ -3246,22 +3073,21 @@ function renderOverlayChart(metricName, runs) {
 
   const width = 640;
   const height = 200;
-  const paddingLeft = 50;
-  const paddingRight = 12;
-  const paddingTop = 12;
-  const paddingBottom = 24;
+  const leftPadding = 50;
+  const rightPadding = 12;
+  const topPadding = 12;
+  const bottomPadding = 24;
 
-  const toCoordinate = (step, value) => ({
+  const toCoordinates = (step, value) => ({
     x:
-      paddingLeft +
+      leftPadding +
       ((step - minimumStep) / stepSpan) *
-        (width - paddingLeft - paddingRight),
-
+        (width - leftPadding - rightPadding),
     y:
       height -
-      paddingBottom -
+      bottomPadding -
       ((value - minimumValue) / valueSpan) *
-        (height - paddingTop - paddingBottom),
+        (height - topPadding - bottomPadding),
   });
 
   const yTicks = [0, 0.5, 1]
@@ -3271,14 +3097,14 @@ function renderOverlayChart(metricName, runs) {
 
       const y =
         height -
-        paddingBottom -
+        bottomPadding -
         fraction *
-          (height - paddingTop - paddingBottom);
+          (height - topPadding - bottomPadding);
 
       return `
         <line
-          x1="${paddingLeft}"
-          x2="${width - paddingRight}"
+          x1="${leftPadding}"
+          x2="${width - rightPadding}"
           y1="${y}"
           y2="${y}"
           stroke="rgba(109,125,147,.16)"
@@ -3286,7 +3112,7 @@ function renderOverlayChart(metricName, runs) {
         />
 
         <text
-          x="${paddingLeft - 8}"
+          x="${leftPadding - 8}"
           y="${y + 3}"
           text-anchor="end"
           font-size="9.5"
@@ -3300,24 +3126,23 @@ function renderOverlayChart(metricName, runs) {
     .join("");
 
   const lines = series
-    .map((entry) => {
-      const sortedPoints = [...entry.points].sort(
+    .map((item) => {
+      const sortedPoints = [...item.points].sort(
         (left, right) =>
           (left.step ?? 0) -
-          (right.step ?? 0),
+          (right.step ?? 0)
       );
 
       const points = sortedPoints
         .map((point) => {
-          const coordinate = toCoordinate(
+          const coordinate = toCoordinates(
             point.step ?? 0,
-            point.value,
+            point.value
           );
 
-          return (
-            `${coordinate.x.toFixed(1)},` +
-            `${coordinate.y.toFixed(1)}`
-          );
+          return `${coordinate.x.toFixed(
+            1
+          )},${coordinate.y.toFixed(1)}`;
         })
         .join(" ");
 
@@ -3325,7 +3150,7 @@ function renderOverlayChart(metricName, runs) {
         <polyline
           points="${points}"
           fill="none"
-          stroke="${entry.color}"
+          stroke="${item.color}"
           stroke-width="2"
           stroke-linejoin="round"
           stroke-linecap="round"
@@ -3344,7 +3169,7 @@ function renderOverlayChart(metricName, runs) {
 
       <svg
         viewBox="0 0 ${width} ${height}"
-        style="width:100%;height:${height}px;display:block;"
+        style="width:100%; height:${height}px; display:block;"
       >
         ${yTicks}
         ${lines}
@@ -3358,13 +3183,13 @@ function renderOverlayChart(metricName, runs) {
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Global failures
-// -----------------------------------------------------------------------------
+// -------------------- screen: global failures --------------------
 
 async function renderFailuresScreen() {
   app.innerHTML = `
-    <p class="loading">loading failures&hellip;</p>
+    <p class="loading">
+      loading failures&hellip;
+    </p>
   `;
 
   let failures;
@@ -3379,8 +3204,13 @@ async function renderFailuresScreen() {
   if (!failures.length) {
     app.innerHTML = `
       <div class="empty-state">
-        <p class="eyebrow">no failures recorded</p>
-        <p>Every run so far has completed successfully.</p>
+        <p class="eyebrow">
+          no failures recorded
+        </p>
+
+        <p>
+          Every run so far has completed successfully.
+        </p>
       </div>
     `;
 
@@ -3408,9 +3238,11 @@ async function renderFailuresScreen() {
               (failure) => `
                 <tr>
                   <td>
-                    <a href="#/failure/${encodeURIComponent(
-                      failure.run_id,
-                    )}">
+                    <a
+                      href="#/failure/${encodeURIComponent(
+                        failure.run_id
+                      )}"
+                    >
                       ${esc(failure.run_id)}
                     </a>
                   </td>
@@ -3420,11 +3252,14 @@ async function renderFailuresScreen() {
 
                   <td>
                     ${esc(
-                      (failure.message || "").slice(0, 70),
+                      (failure.message || "").slice(
+                        0,
+                        70
+                      )
                     )}
                   </td>
                 </tr>
-              `,
+              `
             )
             .join("")}
         </tbody>
@@ -3433,13 +3268,13 @@ async function renderFailuresScreen() {
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Controlled recovery campaigns
-// -----------------------------------------------------------------------------
+// -------------------- screen: campaigns --------------------
 
 async function renderCampaignsScreen() {
   app.innerHTML = `
-    <p class="loading">loading campaigns&hellip;</p>
+    <p class="loading">
+      loading campaigns&hellip;
+    </p>
   `;
 
   let campaigns;
@@ -3455,21 +3290,20 @@ async function renderCampaignsScreen() {
     app.innerHTML = `
       <div class="empty-state">
         <p class="eyebrow">
-          no controlled recovery trials yet
+          no recovery campaigns yet
         </p>
 
         <p>
-          Start from a captured OOM:
-          <code>
-            watcher recover RUN_ID --entrypoint train_trial:run
-          </code>
+          Prepare one without GPU compute, review the
+          sealed plan, and then run it explicitly from
+          the CLI.
         </p>
 
-        <p class="page-subtitle">
-          The runner first reproduces the failure as a
-          control, then evaluates bounded interventions
-          in fresh processes.
-        </p>
+        <code>
+          watcher prepare-recovery RUN_ID
+          --entrypoint train:main
+          --out recovery-plan.json
+        </code>
       </div>
     `;
 
@@ -3477,77 +3311,104 @@ async function renderCampaignsScreen() {
   }
 
   app.innerHTML = `
-    <p class="eyebrow">watcherml</p>
+    <p class="eyebrow">
+      watcherml / recovery
+    </p>
 
     <h1 class="page-title">
-      OOM recovery campaigns
+      Recovery campaigns
     </h1>
 
     <p class="page-subtitle">
-      Controlled trials, explicit budgets, and confirmation
-      before verification.
+      Read-only records of bounded proposals,
+      isolated trials, and independent confirmation.
     </p>
 
-    <div class="card-grid">
-      ${campaigns
-        .map(
-          (campaign) => {
-            const status =
-              campaign.verification_status ||
-              campaign.status ||
-              "pending";
+    <div class="panel">
+      <div class="runs-table-wrapper">
+        <table class="runs-table">
+          <thead>
+            <tr>
+              <th>campaign</th>
+              <th>project</th>
+              <th>status</th>
+              <th>verification</th>
+              <th>phases</th>
+              <th>stopped reason</th>
+            </tr>
+          </thead>
 
-            const active =
-              campaign.status === "active" ||
-              campaign.status === "running";
+          <tbody>
+            ${campaigns
+              .map(
+                (campaign) => `
+                  <tr>
+                    <td>
+                      <a
+                        href="#/campaign/${encodeURIComponent(
+                          campaign.campaign_id
+                        )}"
+                      >
+                        ${esc(campaign.campaign_id)}
+                      </a>
+                    </td>
 
-            const trialCount =
-              campaign.trial_count ?? 0;
+                    <td>${esc(campaign.project)}</td>
+                    <td>${badge(campaign.status)}</td>
 
-            return `
-              <a
-                class="card"
-                href="#/campaign/${encodeURIComponent(
-                  campaign.campaign_id,
-                )}"
-              >
-                <div class="card-title">
-                  ${esc(campaign.campaign_id)}
-                </div>
+                    <td>
+                      ${verificationBadge(
+                        campaign.verification_status
+                      )}
+                    </td>
 
-                <div class="card-meta">
-                  <span>${esc(campaign.project)}</span>
+                    <td>
+                      ${
+                        campaign.phase_counts?.probe || 0
+                      }
+                      probe ·
+                      ${
+                        campaign.phase_counts?.full || 0
+                      }
+                      full ·
+                      ${
+                        campaign.phase_counts
+                          ?.confirmation || 0
+                      }
+                      confirmation
+                    </td>
 
-                  <span class="${
-                    active ? "" : "fail-count"
-                  }">
-                    ${esc(status)}
-                  </span>
-
-                  <span>
-                    ${trialCount}
-                    trial${trialCount === 1 ? "" : "s"}
-                  </span>
-                </div>
-              </a>
-            `;
-          },
-        )
-        .join("")}
+                    <td>
+                      ${esc(
+                        campaign.stopped_reason ||
+                          "running"
+                      )}
+                    </td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
 
 async function renderCampaignScreen(campaignId) {
   app.innerHTML = `
-    <p class="loading">loading campaign&hellip;</p>
+    <p class="loading">
+      loading campaign&hellip;
+    </p>
   `;
 
   let campaign;
 
   try {
     campaign = await api(
-      `/campaigns/${encodeURIComponent(campaignId)}`,
+      `/campaigns/${encodeURIComponent(
+        campaignId
+      )}`
     );
   } catch (error) {
     app.innerHTML = errorState(error);
@@ -3558,339 +3419,399 @@ async function renderCampaignScreen(campaignId) {
     ? campaign.trials
     : [];
 
+  const proposals = Array.isArray(
+    campaign.proposals
+  )
+    ? campaign.proposals
+    : [];
+
+  const verifications = Array.isArray(
+    campaign.verifications
+  )
+    ? campaign.verifications
+    : [];
+
   const contract = campaign.contract || {};
+  const usage = campaign.usage || {};
+  const phaseCounts = campaign.phase_counts || {};
 
-  const phaseOf = (trial) =>
-    String(
-      trial.phase ||
-      trial.role ||
-      "probe",
-    ).toLowerCase();
-
-  const outcomeOf = (trial) =>
-    String(
-      trial.outcome ||
-      trial.status ||
-      "pending",
-    ).toLowerCase();
-
-  const isConfirmationTrial = (trial) =>
-    [
-      "confirmation",
-      "confirm",
-      "verification",
-      "verify",
-      "full",
-    ].includes(phaseOf(trial));
-
-  const trialIsVerified = (trial) =>
-    Boolean(
-      trial &&
-      (
-        trial.verified === true ||
-        String(
-          trial.verification_status || "",
-        ).toLowerCase() === "verified" ||
-        (
-          isConfirmationTrial(trial) &&
-          [
-            "success",
-            "passed",
-            "verified",
-          ].includes(outcomeOf(trial))
-        )
-      ),
+  const active =
+    campaign.status === "running" ||
+    (
+      !campaign.ended_at &&
+      campaign.verification_status === "pending"
     );
 
-  const verifiedTrial =
-    trials.find(trialIsVerified) || null;
+  const verified = campaign.verified === true;
 
-  const candidateTrial =
-    trials.find(
-      (trial) =>
-        trial.run_id === campaign.best_run_id,
-    ) ||
-    trials
-      .filter(
-        (trial) =>
-          phaseOf(trial) === "probe" &&
-          ["success", "passed"].includes(
-            outcomeOf(trial),
-          ),
-      )
-      .at(-1) ||
-    null;
-
-  const selectedTrial =
-    verifiedTrial || candidateTrial;
-
-  const selectedIndex = selectedTrial
-    ? trials.indexOf(selectedTrial)
-    : -1;
-
-  const campaignVerified = Boolean(
-    campaign.verified === true ||
-    String(
-      campaign.verification_status || "",
-    ).toLowerCase() === "verified" ||
-    verifiedTrial,
+  const maximumTrials = firstFinite(
+    contract.max_trials,
+    usage.max_trials
   );
 
-  const recordedMetrics = trials
-    .map((trial) =>
-      firstFinite(
-        trial.peak_vram_gb,
-        trial.peak_vram,
-        trial.score,
-        trial.objective_value,
-      ),
-    )
-    .filter((value) => value !== null);
-
-  const peakVram = firstFinite(
-    selectedTrial?.peak_vram_gb,
-    selectedTrial?.peak_vram,
-    campaign.peak_vram_gb,
-    campaign.peak_vram,
-    contract.peak_vram_gb,
-    contract.max_vram_gb,
+  const maximumGpuSeconds = firstFinite(
+    contract.max_gpu_seconds,
+    usage.max_gpu_seconds
   );
 
   const gpuSeconds = firstFinite(
-    campaign.gpu_seconds_used,
-    campaign.gpu_time_seconds,
-    campaign.total_gpu_seconds,
-    contract.gpu_seconds_used,
+    usage.gpu_seconds,
+    usage.total_gpu_seconds,
+    usage.used_gpu_seconds
   );
 
-  const gpuBudgetSeconds = firstFinite(
-    contract.max_gpu_seconds,
-    contract.gpu_budget_seconds,
-    contract.max_gpu_hours !== undefined
-      ? Number(contract.max_gpu_hours) * 3600
-      : null,
+  const elapsedSeconds = firstFinite(
+    usage.elapsed_seconds,
+    usage.wall_seconds
   );
 
-  const budgetPercentage =
-    gpuBudgetSeconds && gpuSeconds !== null
-      ? Math.min(
-          100,
-          (gpuSeconds / gpuBudgetSeconds) * 100,
-        )
-      : null;
+  const rankingRows = Array.isArray(
+    campaign.ranking
+  )
+    ? campaign.ranking
+    : campaign.ranking?.assessments ||
+      campaign.ranking?.candidates ||
+      [];
 
-  const terminalStatuses = [
-    "stopped",
-    "completed",
-    "verified",
-    "recovered",
-    "inconclusive",
-    "failed",
-  ];
+  const proposalRows = proposals
+    .map((proposalRecord) => {
+      const proposal =
+        proposalRecord.proposal || {};
 
-  const isActive =
-    !campaign.ended_at &&
-    !terminalStatuses.includes(
-      String(campaign.status || "").toLowerCase(),
-    );
+      const configPatch =
+        proposal.config_patch ||
+        proposal.patch ||
+        proposal.changes ||
+        {};
 
-  const statusLabel = campaignVerified
-    ? "Verified"
-    : isActive
-      ? "Trial running"
-      : candidateTrial
-        ? "Awaiting confirmation"
-        : "Inconclusive";
+      const environmentPatch =
+        proposal.environment_patch || {};
 
-  const evidenceSteps = [
-    {
-      text: `
-        Captured the baseline failure signature from
-        <strong>
-          ${esc(campaign.source_run_id || "source run")}
-        </strong>.
-      `,
-      meta: "deterministic evidence capture",
-      active: false,
-    },
-  ];
+      const serializedChanges = Array.isArray(
+        proposal.changes
+      )
+        ? proposal.changes
+            .map(
+              (change) =>
+                `${change.capability_id} ` +
+                `${change.operation} ` +
+                `${change.proposed_value}`
+            )
+            .join(" · ")
+        : formatPatch(configPatch);
 
-  trials.slice(-3).forEach((trial) => {
-    const phase = phaseOf(trial);
-    const outcome = outcomeOf(trial);
-
-    const passed = [
-      "success",
-      "passed",
-      "verified",
-    ].includes(outcome);
-
-    evidenceSteps.push({
-      text:
-        phase === "control"
-          ? `
-            Control trial
-            <strong>${esc(outcome)}</strong>
-            with the original configuration.
-          `
-          : `
-            ${esc(phase)} trial
-            <strong>${esc(outcome)}</strong>
-            after ${esc(formatPatch(trial.patch))}.
-          `,
-
-      meta: trialIsVerified(trial)
-        ? "confirmation criteria satisfied"
-        : passed
-          ? "candidate evidence only"
-          : "intervention rejected or inconclusive",
-
-      active: false,
-    });
-  });
-
-  if (campaignVerified && verifiedTrial) {
-    evidenceSteps.push({
-      text: `
-        <strong>Recovery verified.</strong>
-        ${esc(formatPatch(verifiedTrial.patch))}
-      `,
-      meta: "fresh-process confirmation passed",
-      active: true,
-    });
-  } else if (isActive) {
-    evidenceSteps.push({
-      text: "Waiting for the next bounded trial result.",
-      meta: "no verification claim yet",
-      active: true,
-    });
-  }
-
-  const trialRows = trials
-    .map((trial, index) => {
-      const phase = phaseOf(trial);
-      const outcome = outcomeOf(trial);
-
-      const passed = [
-        "success",
-        "passed",
-        "verified",
-      ].includes(outcome);
-
-      let decision = "inconclusive";
-      let decisionClass = "rejected";
-
-      if (trialIsVerified(trial)) {
-        decision = "verified";
-        decisionClass = "best";
-      } else if (
-        phase === "control" &&
-        !passed
-      ) {
-        decision = "oom reproduced";
-        decisionClass = "keep";
-      } else if (
-        phase === "probe" &&
-        passed
-      ) {
-        decision = "candidate";
-        decisionClass = "keep";
-      } else if (
-        ["failed", "oom", "rejected"].includes(outcome)
-      ) {
-        decision = "rejected";
-      }
-
-      const score = firstFinite(
-        trial.score,
-        trial.objective_value,
-      );
-
-      const resultText =
-        trial.result_summary ||
-        (
-          passed
-            ? score !== null
-              ? `${
-                  contract.goal_metric ||
-                  "recorded metric"
-                } ${fmtNum(score, 3)}`
-              : "Trial completed"
-            : outcome
-        );
+      const changeText =
+        [
+          serializedChanges,
+          Object.keys(environmentPatch).length
+            ? `environment: ${formatPatch(
+                environmentPatch
+              )}`
+            : "",
+        ]
+          .filter(
+            (value, index) =>
+              value &&
+              (
+                index > 0 ||
+                value !== "No configuration change"
+              )
+          )
+          .join(" · ") ||
+        "No executable change";
 
       return `
         <tr>
           <td>
-            #${String(index + 1).padStart(2, "0")}
-            <span class="text-muted">
-              ${esc(phase)}
-            </span>
-          </td>
-
-          <td class="trial-intervention">
-            ${esc(formatPatch(trial.patch))}
-          </td>
-
-          <td class="trial-result ${
-            passed ? "good" : "bad"
-          }">
-            ${esc(resultText)}
+            <code>
+              ${esc(proposalRecord.proposal_id)}
+            </code>
           </td>
 
           <td>
-            <span class="decision-pill ${decisionClass}">
-              ${decision}
-            </span>
+            ${esc(proposalRecord.policy_rule)}
+          </td>
+
+          <td>
+            ${esc(
+              (
+                proposalRecord.authorization_mode ||
+                "unknown"
+              ).replaceAll("_", " ")
+            )}
+          </td>
+
+          <td>
+            ${badge(proposalRecord.state)}
+          </td>
+
+          <td>${esc(changeText)}</td>
+
+          <td>
+            ${
+              proposalRecord.skip_code
+                ? `
+                  <strong>
+                    ${esc(proposalRecord.skip_code)}
+                  </strong>:
+                  ${esc(
+                    proposalRecord.skip_reason ||
+                      "skipped"
+                  )}
+                `
+                : esc(
+                    proposalRecord.rationale || ""
+                  )
+            }
           </td>
         </tr>
       `;
     })
     .join("");
 
-  const maximumTrials = firstFinite(
-    contract.max_trials,
-    contract.trial_budget,
-    campaign.max_trials,
-  );
+  const trialRows = trials
+    .map(
+      (trial) => `
+        <tr>
+          <td>${esc(trial.phase)}</td>
 
-  const confirmationRuns = firstFinite(
-    contract.confirmation_runs,
-    contract.required_confirmations,
-    campaign.confirmation_runs,
-  );
+          <td>
+            <a
+              href="#/run/${encodeURIComponent(
+                trial.run_id
+              )}"
+            >
+              ${esc(trial.run_id)}
+            </a>
 
-  const maximumRegression = firstFinite(
-    contract.max_metric_regression_pct,
-    contract.max_regression_pct,
-  );
+            <br />
 
-  const minimumHeadroom = firstFinite(
-    contract.min_vram_headroom_pct,
-    contract.vram_headroom_pct,
-  );
+            <small>
+              ${esc(trial.candidate_id)}
+            </small>
+          </td>
 
-  const permissions = contract.permissions || {};
+          <td>
+            ${badge(trial.status)}
 
-  const allowedAutomaticChanges = Object.entries(
-    permissions,
-  )
-    .filter(
-      ([, value]) =>
-        value === "automatic" ||
-        value === true,
+            ${
+              trial.failure_class
+                ? `
+                  <br />
+                  <small>
+                    ${esc(trial.failure_class)}
+                  </small>
+                `
+                : ""
+            }
+          </td>
+
+          <td>
+            ${esc(
+              formatPatch(trial.config_patch)
+            )}
+
+            ${
+              Object.keys(
+                trial.environment_patch || {}
+              ).length
+                ? `
+                  <br />
+                  <small>
+                    env:
+                    ${esc(
+                      formatPatch(
+                        trial.environment_patch
+                      )
+                    )}
+                  </small>
+                `
+                : ""
+            }
+          </td>
+
+          <td>
+            ${trial.progress_steps ?? "&mdash;"}
+          </td>
+
+          <td>
+            ${
+              trial.peak_vram_gib !== null &&
+              trial.peak_vram_gib !== undefined
+                ? `${fmtNum(
+                    trial.peak_vram_gib,
+                    2
+                  )} GiB`
+                : "&mdash;"
+            }
+          </td>
+
+          <td>
+            ${fmtDuration(trial.duration_seconds)}
+          </td>
+
+          <td>
+            ${
+              trial.verified
+                ? verificationBadge("verified")
+                : "&mdash;"
+            }
+          </td>
+        </tr>
+      `
     )
-    .map(([key]) => key.replaceAll("_", " "));
+    .join("");
 
-  const stoppedReason =
-    campaign.stopped_reason ||
-    (
-      isActive
-        ? "Campaign is still running within its configured guardrails."
-        : campaignVerified
-          ? "Confirmation criteria satisfied."
-          : "No intervention met every acceptance criterion."
-    );
+  const verificationCards = verifications
+    .map((verification) => {
+      const report = verification.report || {};
+
+      const checks = Array.isArray(report.checks)
+        ? report.checks
+        : [];
+
+      const confirmationRuns = (
+        verification.confirmation_run_ids || []
+      )
+        .map(
+          (runId) => `
+            <a href="#/run/${encodeURIComponent(runId)}">
+              ${esc(runId)}
+            </a>
+          `
+        )
+        .join(" · ");
+
+      const checkRows = checks
+        .map(
+          (check) => `
+            <div class="guardrail-item">
+              <span class="guardrail-icon">
+                ${
+                  check.outcome === "pass"
+                    ? "✓"
+                    : check.outcome === "missing"
+                      ? "?"
+                      : "×"
+                }
+              </span>
+
+              <span>
+                <strong>
+                  ${esc(
+                    check.code ||
+                      "verification_check"
+                  )}
+                </strong>
+
+                ${
+                  check.run_id
+                    ? `
+                      —
+                      <a
+                        href="#/run/${encodeURIComponent(
+                          check.run_id
+                        )}"
+                      >
+                        ${esc(check.run_id)}
+                      </a>
+                    `
+                    : ""
+                }
+
+                :
+                ${esc(
+                  check.message ||
+                    check.outcome ||
+                    "recorded"
+                )}
+              </span>
+            </div>
+          `
+        )
+        .join("");
+
+      return `
+        <article class="panel m0">
+          <h3 class="section-title">
+            ${esc(verification.candidate_id)}
+
+            ${verificationBadge(
+              verification.verified
+                ? "verified"
+                : "not_verified"
+            )}
+          </h3>
+
+          <div class="field">
+            <span class="field-label">
+              confirmation runs
+            </span>
+
+            <span class="field-value">
+              ${confirmationRuns || "none"}
+            </span>
+          </div>
+
+          ${
+            checkRows
+              ? `
+                <div class="guardrail-list">
+                  ${checkRows}
+                </div>
+              `
+              : `
+                <p class="ai-empty">
+                  The complete verifier report remains
+                  available in the campaign artifact.
+                </p>
+              `
+          }
+        </article>
+      `;
+    })
+    .join("");
+
+  const rankingHtml = rankingRows.length
+    ? `
+      <table class="runs-table">
+        <thead>
+          <tr>
+            <th>candidate</th>
+            <th>recorded ranking fields</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          ${rankingRows
+            .map(
+              (ranking) => `
+                <tr>
+                  <td>
+                    ${esc(
+                      ranking.candidate_id ||
+                        ranking.proposal_id ||
+                        "candidate"
+                    )}
+                  </td>
+
+                  <td>
+                    <code>
+                      ${esc(JSON.stringify(ranking))}
+                    </code>
+                  </td>
+                </tr>
+              `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : `
+      <p class="ai-empty">
+        No provisional ranking was persisted.
+      </p>
+    `;
 
   app.innerHTML = `
     <div class="campaign-workspace">
@@ -3908,39 +3829,53 @@ async function renderCampaignScreen(campaignId) {
           campaign / ${esc(campaignId)}
         </div>
 
-        <div class="agent-state ${
-          isActive ? "" : "stopped"
-        }">
-          ${esc(statusLabel)}
+        <div
+          class="agent-state ${
+            active ? "" : "stopped"
+          }"
+        >
+          ${
+            active
+              ? "campaign running"
+              : verified
+                ? "verified recovery"
+                : "campaign stopped"
+          }
         </div>
       </div>
 
       <div class="campaign-body">
         <section class="campaign-hero">
-          <p class="eyebrow autopilot-label">
-            Recovery campaign
+          <p class="eyebrow">
+            deterministic OOM recovery
           </p>
 
           <h1 class="page-title">
-            Verify an OOM recovery
+            Campaign audit trail
           </h1>
 
           <p class="page-subtitle">
-            Controlled, isolated trials for
-            ${esc(
-              campaign.project ||
-              "this experiment",
-            )}
-            
+            ${esc(campaign.project)}
+            · source failure
+
+            <a
+              href="#/failure/${encodeURIComponent(
+                campaign.source_run_id
+              )}"
+            >
+              ${esc(campaign.source_run_id)}
+            </a>
           </p>
 
           <div class="campaign-actions">
             ${
               campaign.source_run_id
                 ? `
-                  <a href="#/run/${encodeURIComponent(
-                    campaign.source_run_id,
-                  )}">
+                  <a
+                    href="#/run/${encodeURIComponent(
+                      campaign.source_run_id
+                    )}"
+                  >
                     <button class="ghost">
                       View source run
                     </button>
@@ -3953,11 +3888,6 @@ async function renderCampaignScreen(campaignId) {
               class="ghost icon-button"
               id="refresh-campaign"
             >
-              <svg viewBox="0 0 24 24">
-                <path
-                  d="M18.5 5.5A9 9 0 1 0 21 12h-2a7 7 0 1 1-2.05-4.95L14 10h7V3l-2.5 2.5Z"
-                />
-              </svg>
               Refresh
             </button>
 
@@ -3968,33 +3898,69 @@ async function renderCampaignScreen(campaignId) {
             >
               Copy campaign ID
             </button>
+
+            ${
+              campaign.artifact?.available
+                ? `
+                  <a
+                    href="${esc(
+                      campaign.artifact.download_url
+                    )}"
+                  >
+                    <button>
+                      Download recovery artifact
+                    </button>
+                  </a>
+                `
+                : ""
+            }
           </div>
-
-          <aside
-            class="campaign-agent-card"
-            aria-label="Deterministic recovery policy"
-          >
-            <span
-              class="agent-glyph"
-              aria-hidden="true"
-            >
-              <svg viewBox="0 0 24 24">
-                <path
-                  d="m12 2 2.55 6.45L21 11l-6.45 2.55L12 20l-2.55-6.45L3 11l6.45-2.55L12 2Z"
-                />
-              </svg>
-            </span>
-
-            <div>
-              <div class="agent-card-title">
-                Deterministic policy
-              </div>
-              <div class="agent-card-copy">
-                Bounded interventions, fresh processes
-              </div>
-            </div>
-          </aside>
         </section>
+
+        ${
+          verified
+            ? `
+              <aside
+                class="verified-fix-toast"
+                aria-label="Verified recovery"
+              >
+                <div
+                  class="verified-icon"
+                  aria-hidden="true"
+                >
+                  ↳
+                </div>
+
+                <div>
+                  <div class="verified-title">
+                    Verified recovery
+                  </div>
+
+                  <div class="verified-copy">
+                    ${esc(
+                      campaign.verified_candidate_id
+                    )}
+                    passed
+                    ${
+                      (
+                        campaign.verified_run_ids ||
+                        []
+                      ).length
+                    }
+                    independent confirmation run${
+                      (
+                        campaign.verified_run_ids ||
+                        []
+                      ).length === 1
+                        ? ""
+                        : "s"
+                    }.
+                  </div>
+                </div>
+              </aside>
+            `
+            : ""
+        }
 
         <section
           class="campaign-stat-strip"
@@ -4002,47 +3968,62 @@ async function renderCampaignScreen(campaignId) {
         >
           <div class="campaign-stat">
             <div class="campaign-stat-label">
-              Selected trial
+              Trials
             </div>
+
             <div class="campaign-stat-value">
+              ${campaign.trial_count}
+
               ${
-                selectedIndex >= 0
-                  ? `#${String(
-                      selectedIndex + 1,
-                    ).padStart(2, "0")}`
-                  : "—"
+                maximumTrials !== null
+                  ? ` / ${maximumTrials}`
+                  : ""
               }
             </div>
           </div>
 
           <div class="campaign-stat">
             <div class="campaign-stat-label">
-              Peak VRAM
+              Phase split
             </div>
-            <div class="campaign-stat-value">
-              ${
-                peakVram !== null
-                  ? `${fmtNum(peakVram, 1)} GB`
-                  : "—"
-              }
+
+            <div
+              class="campaign-stat-value"
+              style="font-size:15px;"
+            >
+              ${phaseCounts.probe || 0}P ·
+              ${phaseCounts.full || 0}F ·
+              ${phaseCounts.confirmation || 0}C
             </div>
           </div>
 
           <div class="campaign-stat">
             <div class="campaign-stat-label">
-              GPU budget used
+              GPU time
             </div>
+
             <div class="campaign-stat-value">
               ${formatGpuTime(gpuSeconds)}
+
+              ${
+                maximumGpuSeconds !== null
+                  ? ` / ${formatGpuTime(
+                      maximumGpuSeconds
+                    )}`
+                  : ""
+              }
             </div>
           </div>
 
           <div class="campaign-stat">
             <div class="campaign-stat-label">
-              Status
+              Verification
             </div>
-            <div class="campaign-stat-value mint">
-              ${statusLabel}
+
+            <div class="campaign-stat-value">
+              ${verificationBadge(
+                campaign.verification_status
+              )}
             </div>
           </div>
         </section>
@@ -4050,62 +4031,173 @@ async function renderCampaignScreen(campaignId) {
         <section class="campaign-primary-grid">
           <article class="campaign-panel">
             <header class="campaign-panel-header">
-              <span>Intervention trace</span>
-              <span class="live-label">
-                ${
-                  campaignVerified
-                    ? "verified"
-                    : isActive
-                      ? "live"
-                      : "recorded"
-                }
-              </span>
+              <span>Bounded execution phases</span>
+              ${provenance("isolated")}
             </header>
 
             <div class="campaign-panel-body">
-              ${evidenceSteps
-                .slice(-5)
-                .map(
-                  (step, index) => `
-                    <div class="reasoning-step campaign-reasoning ${
-                      step.active ? "active" : ""
-                    }">
-                      <span class="reasoning-num">
-                        ${String(index + 1).padStart(2, "0")}
-                      </span>
+              <div
+                class="reasoning-step campaign-reasoning"
+              >
+                <span class="reasoning-num">01</span>
 
-                      <span class="reasoning-text">
-                        ${step.text}
+                <span class="reasoning-text">
+                  Policy proposals
 
-                        <span class="reasoning-meta">
-                          ${esc(step.meta)}
-                        </span>
-                      </span>
-                    </div>
-                  `,
-                )
-                .join("")}
+                  <span class="reasoning-meta">
+                    ${proposals.length} recorded ·
+                    ${
+                      campaign.skipped_proposals
+                        ?.length || 0
+                    }
+                    skipped
+                  </span>
+                </span>
+              </div>
+
+              <div
+                class="reasoning-step campaign-reasoning"
+              >
+                <span class="reasoning-num">02</span>
+
+                <span class="reasoning-text">
+                  Short probes
+
+                  <span class="reasoning-meta">
+                    ${phaseCounts.probe || 0}
+                    fresh subprocesses ·
+                    ${
+                      campaign.probe_survivor_ids
+                        ?.length || 0
+                    }
+                    survivors
+                  </span>
+                </span>
+              </div>
+
+              <div
+                class="reasoning-step campaign-reasoning"
+              >
+                <span class="reasoning-num">03</span>
+
+                <span class="reasoning-text">
+                  Full trials
+
+                  <span class="reasoning-meta">
+                    ${phaseCounts.full || 0}
+                    candidates evaluated against
+                    the contract
+                  </span>
+                </span>
+              </div>
+
+              <div
+                class="reasoning-step campaign-reasoning ${
+                  verified ? "active" : ""
+                }"
+              >
+                <span class="reasoning-num">04</span>
+
+                <span class="reasoning-text">
+                  Independent confirmation
+
+                  <span class="reasoning-meta">
+                    ${
+                      phaseCounts.confirmation || 0
+                    }
+                    runs ·
+                    ${
+                      verified
+                        ? "recovery verified"
+                        : "no verified recovery"
+                    }
+                  </span>
+                </span>
+              </div>
             </div>
           </article>
 
           <article class="campaign-panel">
             <header class="campaign-panel-header">
-              <span>Recorded trial metric</span>
-              <span class="objective-change">
-                ${provenance("captured")}
-              </span>
+              <span>Evidence integrity</span>
+              ${provenance("calculated")}
             </header>
 
-            <div class="objective-panel-body">
-              ${renderSparkline(recordedMetrics)}
+            <div class="campaign-panel-body">
+              <div class="field">
+                <span class="field-label">
+                  contract digest
+                </span>
 
-              <div class="chart-axis-labels">
-                <span>control</span>
-                <span>
+                <span class="field-value">
+                  <code
+                    title="${esc(
+                      campaign.contract_digest
+                    )}"
+                  >
+                    ${shortDigest(
+                      campaign.contract_digest
+                    )}
+                  </code>
+                </span>
+              </div>
+
+              <div class="field">
+                <span class="field-label">
+                  preparation digest
+                </span>
+
+                <span class="field-value">
+                  <code
+                    title="${esc(
+                      campaign.preparation_digest
+                    )}"
+                  >
+                    ${shortDigest(
+                      campaign.preparation_digest
+                    )}
+                  </code>
+                </span>
+              </div>
+
+              <div class="field">
+                <span class="field-label">
+                  report digest
+                </span>
+
+                <span class="field-value">
+                  <code
+                    title="${esc(
+                      campaign.report_digest
+                    )}"
+                  >
+                    ${shortDigest(
+                      campaign.report_digest
+                    )}
+                  </code>
+                </span>
+              </div>
+
+              <div class="field">
+                <span class="field-label">
+                  artifact
+                </span>
+
+                <span class="field-value">
                   ${
-                    trials.length
-                      ? `trial ${trials.length}`
-                      : "current"
+                    campaign.artifact?.available
+                      ? `
+                        ${fmtBytes(
+                          campaign.artifact.size_bytes
+                        )}
+                        ·
+                        <code>
+                          ${shortDigest(
+                            campaign.artifact.checksum
+                          )}
+                        </code>
+                      `
+                      : "not available yet"
                   }
                 </span>
               </div>
@@ -4113,15 +4205,59 @@ async function renderCampaignScreen(campaignId) {
           </article>
         </section>
 
-        <section class="campaign-trials-panel">
+        <section class="panel">
+          <h2 class="section-title">
+            Policy proposals
+            ${provenance("deterministic")}
+          </h2>
+
           <div class="runs-table-wrapper">
             <table class="runs-table">
               <thead>
                 <tr>
-                  <th>trial</th>
+                  <th>proposal</th>
+                  <th>rule</th>
+                  <th>authorization</th>
+                  <th>state</th>
+                  <th>bounded change</th>
+                  <th>rationale / skip</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                ${
+                  proposalRows ||
+                  `
+                    <tr>
+                      <td colspan="6">
+                        No proposals were recorded.
+                      </td>
+                    </tr>
+                  `
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="campaign-trials-panel">
+          <header class="campaign-panel-header">
+            <span>Isolated trial evidence</span>
+            ${provenance("isolated")}
+          </header>
+
+          <div class="runs-table-wrapper">
+            <table class="runs-table">
+              <thead>
+                <tr>
+                  <th>phase</th>
+                  <th>run / candidate</th>
+                  <th>status</th>
                   <th>intervention</th>
-                  <th>result</th>
-                  <th>decision</th>
+                  <th>steps</th>
+                  <th>peak VRAM</th>
+                  <th>duration</th>
+                  <th>proof</th>
                 </tr>
               </thead>
 
@@ -4131,7 +4267,7 @@ async function renderCampaignScreen(campaignId) {
                   `
                     <tr>
                       <td
-                        colspan="4"
+                        colspan="8"
                         class="text-muted"
                       >
                         No trials have been recorded yet.
@@ -4144,149 +4280,113 @@ async function renderCampaignScreen(campaignId) {
           </div>
         </section>
 
+        <section class="panel">
+          <h2 class="section-title">
+            Provisional ranking
+            ${provenance("provisional")}
+          </h2>
+
+          <p>
+            Ranking chooses which completed candidate
+            is worth confirming next. It is not a
+            recovery verdict and never sets
+            verifier-owned state.
+          </p>
+
+          ${rankingHtml}
+        </section>
+
+        <section>
+          <h2 class="section-title">
+            Independent verification
+
+            ${provenance(
+              verified ? "verified" : "calculated"
+            )}
+          </h2>
+
+          <div class="campaign-support-grid">
+            ${
+              verificationCards ||
+              `
+                <article class="panel m0">
+                  <p>
+                    No confirmation report has been
+                    recorded. A successful probe or
+                    full trial is still only a
+                    candidate.
+                  </p>
+                </article>
+              `
+            }
+          </div>
+        </section>
+
         <section class="campaign-support-grid">
           <article class="panel m0">
             <h2 class="section-title">
-              Recovery contract
-              ${provenance("policy")}
+              Sealed contract
             </h2>
 
-            <div class="contract-grid">
-              <div class="contract-item">
-                <div class="field-label">
-                  trial budget
-                </div>
-                <div class="contract-value">
-                  ${
-                    maximumTrials !== null
-                      ? `${trials.length} / ${maximumTrials} trials`
-                      : `${trials.length} trials used`
-                  }
-                </div>
-              </div>
-
-              <div class="contract-item">
-                <div class="field-label">
-                  confirmation runs
-                </div>
-                <div class="contract-value">
-                  ${
-                    confirmationRuns !== null
-                      ? confirmationRuns
-                      : "required before verification"
-                  }
-                </div>
-              </div>
-
-              <div class="contract-item">
-                <div class="field-label">
-                  max metric regression
-                </div>
-                <div class="contract-value">
-                  ${
-                    maximumRegression !== null
-                      ? `${fmtNum(maximumRegression, 1)}%`
-                      : "must be declared"
-                  }
-                </div>
-              </div>
-
-              <div class="contract-item">
-                <div class="field-label">
-                  minimum VRAM headroom
-                </div>
-                <div class="contract-value">
-                  ${
-                    minimumHeadroom !== null
-                      ? `${fmtNum(minimumHeadroom, 1)}%`
-                      : "must be declared"
-                  }
-                </div>
-              </div>
-
-              <div class="contract-item">
-                <div class="field-label">
-                  effective batch
-                </div>
-                <div class="contract-value">
-                  ${
-                    contract.preserve_effective_batch === false
-                      ? "change allowed"
-                      : "preserved"
-                  }
-                </div>
-              </div>
-
-              <div class="contract-item">
-                <div class="field-label">
-                  allowed interventions
-                </div>
-                <div class="contract-value">
-                  ${esc(
-                    allowedAutomaticChanges.join(", ") ||
-                    "policy controlled",
-                  )}
-                </div>
-              </div>
-            </div>
-
-            ${
-              budgetPercentage !== null
-                ? `
-                  <div
-                    class="budget-track"
-                    title="${budgetPercentage.toFixed(0)}% of GPU budget used"
-                  >
-                    <div
-                      class="budget-fill"
-                      style="width:${budgetPercentage.toFixed(1)}%"
-                    ></div>
-                  </div>
-                `
-                : ""
-            }
+            ${jsonBlock(contract)}
           </article>
 
           <article class="panel m0">
-            <h2 class="section-title">Guardrails</h2>
+            <h2 class="section-title">
+              Campaign boundary
+            </h2>
 
-            <div class="guardrail-list">
-              <div class="guardrail-item">
-                <span class="guardrail-icon">01</span>
-                <span>
-                  Reproduce the original OOM as a control
-                  before testing a change.
-                </span>
-              </div>
+            <div class="field">
+              <span class="field-label">
+                status
+              </span>
 
-              <div class="guardrail-item">
-                <span class="guardrail-icon">02</span>
-                <span>
-                  Run every trial in a fresh process with
-                  the same environment and dataset identity.
-                </span>
-              </div>
-
-              <div class="guardrail-item">
-                <span class="guardrail-icon">03</span>
-                <span>
-                  Change one bounded factor at a time and
-                  stop at the declared trial or GPU budget.
-                </span>
-              </div>
-
-              <div class="guardrail-item">
-                <span class="guardrail-icon">04</span>
-                <span>
-                  Require confirmation runs, memory headroom,
-                  and metric constraints before verification.
-                </span>
-              </div>
+              <span class="field-value">
+                ${badge(campaign.status)}
+              </span>
             </div>
 
-            <p class="page-subtitle mt16 m0">
-              <strong>Stopped because:</strong>
-              ${esc(stoppedReason)}
+            <div class="field">
+              <span class="field-label">
+                stopped reason
+              </span>
+
+              <span class="field-value">
+                ${esc(
+                  campaign.stopped_reason ||
+                    "running"
+                )}
+              </span>
+            </div>
+
+            <div class="field">
+              <span class="field-label">
+                wall time
+              </span>
+
+              <span class="field-value">
+                ${fmtDuration(elapsedSeconds)}
+              </span>
+            </div>
+
+            <div class="field">
+              <span class="field-label">
+                verified candidate
+              </span>
+
+              <span class="field-value">
+                ${esc(
+                  campaign.verified_candidate_id
+                )}
+              </span>
+            </div>
+
+            <p class="page-subtitle">
+              Inspect from the terminal:
+
+              <code>
+                watcher recovery ${esc(campaignId)}
+              </code>
             </p>
           </article>
         </section>
@@ -4302,14 +4402,12 @@ async function renderCampaignScreen(campaignId) {
     });
 }
 
-// -----------------------------------------------------------------------------
-// Verified recovery history
-// -----------------------------------------------------------------------------
+// -------------------- resolution memory --------------------
 
 async function renderMemoryScreen() {
   app.innerHTML = `
     <p class="loading">
-      loading verified recovery history&hellip;
+      loading resolution memory&hellip;
     </p>
   `;
 
@@ -4326,12 +4424,12 @@ async function renderMemoryScreen() {
     app.innerHTML = `
       <div class="empty-state">
         <p class="eyebrow">
-          no verified recovery history yet
+          no resolution history yet
         </p>
 
         <p>
-          History is added only after controlled confirmation
-          trials satisfy their recovery contract.
+          This builds automatically as recovery
+          campaigns run. There is nothing to configure.
         </p>
       </div>
     `;
@@ -4343,39 +4441,30 @@ async function renderMemoryScreen() {
     <p class="eyebrow">watcherml</p>
 
     <h1 class="page-title">
-      Verified recovery history
-      ${provenance("verified")}
+      Resolution memory
+      ${provenance("calculated")}
     </h1>
 
     <p class="page-subtitle">
-      Evidence from confirmed OOM recoveries. Prior outcomes
-      can inform a proposal, but they never replace a new
-      controlled trial.
+      Historical full-trial outcomes and
+      verifier-backed recoveries are reported
+      separately. Completion is not proof.
     </p>
 
     ${signatures
       .map((signature) => {
-        const successRate =
-          firstFinite(signature.success_rate) ?? 0;
+        const completionRate =
+          signature.success_rate || 0;
 
-        const rateClass =
-          successRate >= 0.7
+        const verificationRate =
+          signature.verification_rate || 0;
+
+        const completionClass =
+          completionRate >= 0.7
             ? "good"
-            : successRate <= 0.3
+            : completionRate <= 0.3
               ? "bad"
               : "mixed";
-
-        const patchKeys = Array.isArray(
-          signature.patch_keys,
-        )
-          ? signature.patch_keys
-          : [];
-
-        const examplePatches = Array.isArray(
-          signature.example_patches,
-        )
-          ? signature.example_patches
-          : [];
 
         return `
           <div class="signature-card">
@@ -4384,29 +4473,50 @@ async function renderMemoryScreen() {
               &mdash;
               changing
               ${esc(
-                patchKeys.join(", ") ||
-                "(no keys)",
+                (signature.patch_keys || []).join(
+                  ", "
+                ) || "(no keys)"
               )}
             </div>
 
             <div class="resolution-row">
               <span>
-                ${
-                  examplePatches
-                    .map((patch) =>
-                      esc(JSON.stringify(patch)),
-                    )
-                    .join(" / ") ||
-                  "No patch example recorded"
-                }
+                ${(signature.example_patches || [])
+                  .map((patch) =>
+                    esc(JSON.stringify(patch))
+                  )
+                  .join(" / ")}
               </span>
 
-              <span class="resolution-rate ${rateClass}">
-                ${signature.successes ?? 0}/${
-                  signature.attempts ?? 0
+              <span
+                class="resolution-rate ${completionClass}"
+              >
+                ${signature.successes}/${
+                  signature.attempts
                 }
-                successful
-                (${(successRate * 100).toFixed(0)}%)
+                full trials completed
+                (${(completionRate * 100).toFixed(0)}%)
+              </span>
+            </div>
+
+            <div class="resolution-row">
+              <span>
+                ${provenance("verified")}
+                independent confirmation
+              </span>
+
+              <span
+                class="resolution-rate ${
+                  verificationRate > 0
+                    ? "good"
+                    : "mixed"
+                }"
+              >
+                ${
+                  signature.verified_recoveries || 0
+                }/${signature.attempts}
+                verified
+                (${(verificationRate * 100).toFixed(0)}%)
               </span>
             </div>
           </div>
@@ -4416,13 +4526,13 @@ async function renderMemoryScreen() {
   `;
 }
 
-// -----------------------------------------------------------------------------
-// Settings
-// -----------------------------------------------------------------------------
+// -------------------- settings --------------------
 
 async function renderSettingsScreen() {
   app.innerHTML = `
-    <p class="loading">loading settings&hellip;</p>
+    <p class="loading">
+      loading settings&hellip;
+    </p>
   `;
 
   let settings;
@@ -4434,24 +4544,23 @@ async function renderSettingsScreen() {
     return;
   }
 
-  const runtime = settings.runtime || {};
   const gpu = settings.gpu || {};
-
-  const isolatedTrialRunner =
-    settings.isolated_trial_runner ??
-    runtime.isolated_trial_runner;
+  const gpus = gpu.gpus || [];
 
   app.innerHTML = `
     <p class="eyebrow">watcherml</p>
     <h1 class="page-title">Settings</h1>
 
     <div class="panel">
-      <h2 class="section-title">Local storage</h2>
+      <h2 class="section-title">
+        Local storage
+      </h2>
 
       <div class="field">
         <span class="field-label">
           data directory
         </span>
+
         <span class="field-value">
           ${esc(settings.data_directory)}
         </span>
@@ -4461,80 +4570,79 @@ async function renderSettingsScreen() {
         <span class="field-label">
           database
         </span>
+
         <span class="field-value">
           ${esc(settings.database_path)}
+        </span>
+      </div>
+
+      <div class="field">
+        <span class="field-label">
+          schema version
+        </span>
+
+        <span class="field-value">
+          ${esc(settings.storage_schema_version)}
         </span>
       </div>
     </div>
 
     <div class="panel">
-      <h2 class="section-title">Runtime</h2>
+      <h2 class="section-title">
+        Recovery safety boundary
+      </h2>
 
       <div class="field">
-        <span class="field-label">mode</span>
-        <span class="field-value">
-          ${esc(
-            settings.mode ||
-            runtime.mode ||
-            "local",
-          )}
+        <span class="field-label">
+          execution surface
         </span>
-      </div>
 
-      <div class="field">
-        <span class="field-label">python</span>
         <span class="field-value">
           ${esc(
-            settings.python_version ||
-            runtime.python_version,
-          )}
-        </span>
-      </div>
-
-      <div class="field">
-        <span class="field-label">pytorch</span>
-        <span class="field-value">
-          ${esc(
-            settings.torch_version ||
-            runtime.torch_version,
+            (
+              settings.recovery_execution_surface ||
+              "sdk_or_cli"
+            ).replaceAll("_", " + ")
           )}
         </span>
       </div>
 
       <div class="field">
         <span class="field-label">
-          capsule schema
+          trial isolation
         </span>
+
         <span class="field-value">
           ${esc(
-            settings.capsule_schema_version ||
-            runtime.capsule_schema_version ||
-            "v1",
+            (
+              settings.trial_isolation ||
+              "fresh_subprocess"
+            ).replaceAll("_", " ")
           )}
         </span>
       </div>
 
       <div class="field">
         <span class="field-label">
-          isolated trial runner
+          browser mutations
         </span>
 
         <span class="field-value">
           ${
-            isolatedTrialRunner === true
-              ? `
-                <span class="badge success">
-                  available
-                </span>
-              `
-              : isolatedTrialRunner === false
-                ? `
-                  <span class="badge failed">
-                    not available
-                  </span>
-                `
-                : "not reported"
+            settings.web_recovery_mutations_enabled
+              ? badge("enabled")
+              : "disabled (read-only audit UI)"
           }
+        </span>
+      </div>
+
+      <div class="field">
+        <span class="field-label">
+          LLM required
+        </span>
+
+        <span class="field-value">
+          ${settings.llm_required ? "yes" : "no"}
         </span>
       </div>
     </div>
@@ -4543,13 +4651,16 @@ async function renderSettingsScreen() {
       <h2 class="section-title">GPU</h2>
 
       <div class="field">
-        <span class="field-label">detected</span>
+        <span class="field-label">
+          detected
+        </span>
+
         <span class="field-value">
           ${gpu.available ? "yes" : "no"}
         </span>
       </div>
 
-      ${(gpu.gpus || [])
+      ${gpus
         .map(
           (device) => `
             <div class="field">
@@ -4558,10 +4669,11 @@ async function renderSettingsScreen() {
               </span>
 
               <span class="field-value">
-                ${esc(device.memory_total_mib)} MiB total
+                ${esc(device.memory_total_mib)}
+                MiB total
               </span>
             </div>
-          `,
+          `
         )
         .join("")}
     </div>
