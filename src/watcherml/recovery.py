@@ -13,6 +13,7 @@ before claiming isolated or confirmation-verified recovery.
 Only three changes are automatic in this interim policy: batch size, gradient
 accumulation, and gradient checkpointing. Code, dependencies, datasets,
 precision, sequence length, and worker count are never modified.
+Those changes are planned for watcherml version2, when any-llm capabilities will be added.
 """
 from __future__ import annotations
 
