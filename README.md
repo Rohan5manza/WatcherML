@@ -5,7 +5,7 @@
 [![CI](https://github.com/Rohan5manza/WatcherML/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohan5manza/WatcherML/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Deterministic CUDA out-of-memory forensics and verified recovery for ML training.**
+**Your Recovery and forensics layer for ML training.**
 
 WatcherML is a local-first Python SDK and CLI that records ML runs, captures a structured evidence capsule when a run fails, and investigates CUDA out-of-memory failures through bounded, isolated trials.
 
