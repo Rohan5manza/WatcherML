@@ -66,7 +66,7 @@ The executables `watcher` and `watcherml` are equivalent. This README uses `watc
 
 ---
 
-## Improve your ML workflows
+## Massively improve your ML workflows
 
 With the advent of AI dev in today's world, running multiple ML runs for a project has become routine. However, understanding why a run failed on your GPU cluster, which intervention recovered it,
 and whether that recovery can be trusted, remains painfully manual.
