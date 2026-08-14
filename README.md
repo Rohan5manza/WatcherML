@@ -21,6 +21,51 @@ No hosted account is required. No API key is required. No LLM decides what happe
 
 ---
 
+## Installation
+
+WatcherML requires Python 3.10 or newer.
+
+### Core SDK and CLI
+
+```bash
+python -m pip install watcherml
+```
+
+### Jupyter and IPython support
+
+```bash
+python -m pip install "watcherml[notebook]"
+```
+
+### Local web UI
+
+```bash
+python -m pip install "watcherml[ui]"
+```
+
+### Notebook integration and UI
+
+```bash
+python -m pip install "watcherml[notebook,ui]"
+```
+
+The core install includes the recorder, deterministic capsules, recovery engine, SQLite storage, and CLI. Its only direct runtime dependency is `psutil`.
+
+WatcherML does **not** install PyTorch or CUDA. Keep the framework and NVIDIA stack appropriate for your machine or Colab runtime.
+
+Verify the environment:
+
+```bash
+python -c "import watcherml; print(watcherml.__version__)"
+watcher doctor
+```
+
+`watcher doctor` checks storage, the SQLite schema, isolated trial worker, PyTorch, and CUDA. CUDA may be unavailable while recorder and CPU features remain usable.
+
+The executables `watcher` and `watcherml` are equivalent. This README uses `watcher`.
+
+---
+
 ## The short version
 
 A manual retry can make an OOM disappear. That does not necessarily tell a team:
@@ -106,51 +151,6 @@ WatcherML does not modify source code, install dependencies, change datasets, de
 8. **Local-first and portable.** SQLite metadata and artifacts live under `.watcherml/` by default; exported capsules contain checksummed evidence.
 
 9. **Honest boundaries.** Verified means the declared contract passed for recorded confirmations—not that every root cause is proven or every future workload will succeed.
-
----
-
-## Installation
-
-WatcherML requires Python 3.10 or newer.
-
-### Core SDK and CLI
-
-```bash
-python -m pip install watcherml
-```
-
-### Jupyter and IPython support
-
-```bash
-python -m pip install "watcherml[notebook]"
-```
-
-### Local web UI
-
-```bash
-python -m pip install "watcherml[ui]"
-```
-
-### Notebook integration and UI
-
-```bash
-python -m pip install "watcherml[notebook,ui]"
-```
-
-The core install includes the recorder, deterministic capsules, recovery engine, SQLite storage, and CLI. Its only direct runtime dependency is `psutil`.
-
-WatcherML does **not** install PyTorch or CUDA. Keep the framework and NVIDIA stack appropriate for your machine or Colab runtime.
-
-Verify the environment:
-
-```bash
-python -c "import watcherml; print(watcherml.__version__)"
-watcher doctor
-```
-
-`watcher doctor` checks storage, the SQLite schema, isolated trial worker, PyTorch, and CUDA. CUDA may be unavailable while recorder and CPU features remain usable.
-
-The executables `watcher` and `watcherml` are equivalent. This README uses `watcher`.
 
 ---
 
