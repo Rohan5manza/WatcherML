@@ -5,7 +5,7 @@
 [![CI](https://github.com/Rohan5manza/WatcherML/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohan5manza/WatcherML/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Recovery and forensics layer for ML training.**
+**Recovery and forensics layer for ML training**
 
 WatcherML is a local-first Python SDK and CLI that records ML runs, captures a structured evidence capsule when a run fails, and investigates CUDA out-of-memory failures through bounded, isolated trials.
 
@@ -66,9 +66,14 @@ The executables `watcher` and `watcherml` are equivalent. This README uses `watc
 
 ---
 
-## The short version
+## Improve your ML workflows
 
-A manual retry can make an OOM disappear. That does not necessarily tell a team:
+With the advent of AI dev in today's world, running multiple ML runs for a project has become routine. However, understanding why a run failed on your GPU cluster, which intervention recovered it,
+and whether that recovery can be trusted, remains painfully manual.
+
+CUDA OOM errors are arguably the most common bottleneck in AI dev. They can erase hours, or even days, of GPU training.
+
+A manual retry can make a CUDA OOM disappear. That does not necessarily tell a team:
 
 * what state the failed process was in;
 * which evidence supports the diagnosis;
@@ -151,6 +156,13 @@ WatcherML does not modify source code, install dependencies, change datasets, de
 8. **Local-first and portable.** SQLite metadata and artifacts live under `.watcherml/` by default; exported capsules contain checksummed evidence.
 
 9. **Honest boundaries.** Verified means the declared contract passed for recorded confirmations—not that every root cause is proven or every future workload will succeed.
+
+
+WatcherML does more than retry configurations until one run succeeds. It makes recovery bounded, reproducible, and trustworthy. Its architecture was designed keeping this necessary strictness in mind. 
+
+Each component prevents a real problem: captured evidence replaces guesswork, recovery contracts define success before testing, fresh processes prevent state leakage, permissions restrict unsafe changes, and independent confirmation prevents a promising trial from being presented as a verified fix. 
+
+For expensive GPU jobs, recurring failures, and fixes that ML teams must trust, it is the minimum needed to distinguish “this worked once” from “this recovery passed clear constraints and succeeded repeatedly.”
 
 ---
 
@@ -927,6 +939,7 @@ Only confirmation can create a verified recovery.
 
 These boundaries are deliberate. Broader intervention scope must retain isolation, authorization, evidence binding, and verification.
 
+Refer to planned Roadmap for what is planned for future versions of watcherml.
 ---
 
 ## Development
@@ -984,6 +997,7 @@ A new automatic intervention should include:
 
 Open an issue before a large architectural change so trust boundaries and scope can be discussed.
 
+Email rohanmarar5manza@gmail.com for proposals and new ideas. 
 ---
 
 ## FAQ
@@ -994,7 +1008,7 @@ Yes. The package exposes public Python APIs for recording, storage, entrypoint v
 
 The CLI and UI are interfaces over the same package.
 
-### Is it only a batch-size tuner?
+### Is it only a hyperparameter (such as batch size) tuner?
 
 No.
 
@@ -1040,4 +1054,4 @@ WatcherML is released under the [MIT License](LICENSE).
 
 ---
 
-**Every run leaves a receipt. Every failure leaves evidence. A recovery is a claim that must be verified.**
+**WatcherML: Your recovery and forensics layer for ML experiments.**
