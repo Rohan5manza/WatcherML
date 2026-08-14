@@ -11,8 +11,6 @@ WatcherML is a local-first Python SDK and CLI that records ML runs, captures a s
 
 It calls a recovery **verified** only after independent confirmation runs satisfy constraints declared before recovery compute begins.
 
-No hosted account is required. No API key is required. No LLM decides what happened, what may run, or whether a recovery worked.
-
 > **Current scope — v0.1:** WatcherML records successful and failed experiments and deterministically recognizes several common failure classes. Its automated recovery protocol is deliberately narrower: **CUDA OOM during training is the first fully implemented and verifiable vertical.**
 
 * Website: [watcherml.rohanmarar.com](https://watcherml.rohanmarar.com)
