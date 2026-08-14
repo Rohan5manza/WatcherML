@@ -120,12 +120,25 @@ class Storage:
                 )"""
             )
             for name, declaration in (
+                ("project", "TEXT"),
+                ("config_json", "TEXT"),
+                ("started_at", "REAL"),
+                ("ended_at", "REAL"),
+                ("duration_seconds", "REAL"),
+                ("exit_status", "TEXT"),
+                ("git_json", "TEXT"),
+                ("env_json", "TEXT"),
+                ("gpu_json", "TEXT"),
+                ("resource_json", "TEXT"),
+                ("dataset_fingerprint", "TEXT"),
+                ("reproduction_score", "REAL"),
+                ("warnings_json", "TEXT"),
+                ("capsule_schema_version", "TEXT"),
+                ("capture_completeness", "REAL"),
                 ("display_name", "TEXT"),
                 ("tags_json", "TEXT"),
                 ("resolved", "INTEGER NOT NULL DEFAULT 0"),
                 ("resolved_note", "TEXT"),
-                ("capsule_schema_version", "TEXT"),
-                ("capture_completeness", "REAL"),
             ):
                 self._migrate_add_column("runs", name, declaration)
 

@@ -549,12 +549,25 @@ class RecoveryContract:
                 "verification must be VerificationRequirements"
             )
         object.__setattr__(self, "verification", verification)
-        normalized_permissions = permissions or InterventionPermissions()
-        if not isinstance(normalized_permissions, InterventionPermissions):
+        normalized_permissions = (
+            InterventionPermissions()
+            if permissions is None
+            else permissions
+        )
+
+        if not isinstance(
+            normalized_permissions,
+            InterventionPermissions,
+        ):
             raise RecoveryContractError(
                 "permissions must be InterventionPermissions"
             )
-        object.__setattr__(self, "permissions", normalized_permissions)
+
+        object.__setattr__(
+            self,
+            "permissions",
+            normalized_permissions,
+        )
         if budget.probe_steps > verification.minimum_progress_steps:
             raise RecoveryContractError(
                 "probe_steps cannot exceed minimum_progress_steps"

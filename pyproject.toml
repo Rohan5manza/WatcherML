@@ -27,3 +27,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 watcherml = ["webstatic/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

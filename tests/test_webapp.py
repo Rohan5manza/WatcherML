@@ -6,6 +6,12 @@ from fastapi.testclient import TestClient
 import watcherml as watcher
 from watcherml.storage import Storage
 from watcherml.webapp import create_app
+from watcherml.recovery import recover_from_oom
+from watcherml.recovery_contract import (
+    MetricGuard,
+    RecoveryBudget,
+    VerificationRequirements,
+)
 
 
 @pytest.fixture
@@ -113,19 +119,33 @@ def test_global_runs_with_filters(client_and_ids):
     assert body[0]["run_id"] == failed_id
 
 
-def test_rename_and_resolve_run(client_and_ids):
-    client, failed_id, success_id, matching_success_id = client_and_ids
-    resp = client.patch(f"/api/runs/{failed_id}", json={"display_name": "My Named Run"})
-    assert resp.status_code == 200
-    assert resp.json()["display_name"] == "My Named Run"
+def test_rename_run_and_reject_manual_resolution(client_and_ids):
+    client, failed_id, _, _ = client_and_ids
 
-    resp = client.patch(f"/api/runs/{failed_id}", json={"resolved": True, "resolved_note": "fixed it"})
-    assert resp.status_code == 200
-    assert resp.json()["resolved"] is True
+    response = client.patch(
+        f"/api/runs/{failed_id}",
+        json={"display_name": "My Named Run"},
+    )
+    assert response.status_code == 200
+    assert response.json()["display_name"] == "My Named Run"
 
-    resp = client.get(f"/api/runs/{failed_id}")
-    assert resp.json()["resolved_note"] == "fixed it"
+    response = client.patch(
+        f"/api/runs/{failed_id}",
+        json={
+            "resolved": True,
+            "resolved_note": "fixed it manually",
+        },
+    )
+    assert response.status_code == 409
+    assert "verifier" in response.json()["detail"].lower()
 
+    response = client.get(f"/api/runs/{failed_id}")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["display_name"] == "My Named Run"
+    assert body["resolved"] is False
+    assert body["resolved_note"] is None
 
 def test_default_display_name_falls_back_to_config_heuristic(tmp_path):
     storage = Storage(root=str(tmp_path / ".watcherml"))
@@ -152,45 +172,135 @@ def test_campaigns_and_memory_endpoints_empty_when_none_run(client_and_ids):
 
 
 def test_campaigns_and_memory_endpoints_after_a_real_recovery(tmp_path):
-    from watcherml import recovery as recovery_module
-
     storage = Storage(root=str(tmp_path / ".watcherml"))
+
+    source_config = {
+        "batch_size": 32,
+        "gradient_accumulation_steps": 1,
+        "gradient_checkpointing": False,
+        "oom_batch_limit": 16,
+        "full_steps": 20,
+    }
+
     try:
-        with watcher.init(project="demo2", config={"batch_size": 32}, storage=storage) as run:
-            raise RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")
+        with watcher.init(
+            project="demo2",
+            config=source_config,
+            storage=storage,
+        ) as run:
+            raise RuntimeError(
+                "CUDA out of memory. Tried to allocate 2 GiB"
+            )
     except RuntimeError:
         pass
+
     failed_id = run.run_id
 
-    def train_fn(config, max_steps=None):
-        if config["batch_size"] >= 32:
-            raise RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")
-        return {"val_accuracy": 0.8}
+    project_root = tmp_path / "training-project"
+    project_root.mkdir()
 
-    recovery_module.recover_from_oom(
-        project="demo2", failed_run_id=failed_id, train_fn=train_fn, storage=storage)
+    training_module = project_root / "web_recovery_training.py"
+    training_module.write_text(
+        """
+def train(config, max_steps=None):
+    if config["batch_size"] > config.get("oom_batch_limit", 16):
+        raise RuntimeError(
+            "CUDA out of memory. Tried to allocate 2 GiB"
+        )
+
+    steps = (
+        max_steps
+        if max_steps is not None
+        else config.get("full_steps", 20)
+    )
+
+    return {
+        "validation_loss": 0.4,
+        "steps_completed": steps,
+        "throughput": 100.0,
+    }
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    verification = VerificationRequirements(
+        minimum_progress_steps=20,
+        metric_guards=(
+            MetricGuard(
+                name="validation_loss",
+                direction="minimize",
+                baseline_value=0.5,
+                max_regression=0.1,
+            ),
+        ),
+        confirmation_runs=1,
+    )
+
+    budget = RecoveryBudget(
+        max_trials=3,
+        max_probe_trials=1,
+        max_full_trials=1,
+        probe_steps=3,
+        trial_timeout_seconds=20,
+        campaign_timeout_seconds=60,
+    )
+
+    result = recover_from_oom(
+        failed_id,
+        "web_recovery_training:train",
+        verification,
+        budget=budget,
+        storage=storage,
+        project_root=project_root,
+        trials_root=tmp_path / "trials",
+        print_summary=False,
+    )
+
+    assert result.verified is True
 
     app = create_app(storage)
     client = TestClient(app)
 
-    campaigns = client.get("/api/campaigns").json()
+    campaigns_response = client.get("/api/campaigns")
+    assert campaigns_response.status_code == 200
+    campaigns = campaigns_response.json()
+
     assert len(campaigns) == 1
     campaign = campaigns[0]
     campaign_id = campaign["campaign_id"]
 
-    assert campaign["best_run_id"] is None
-    assert campaign["provisional_best_run_id"] is not None
-    assert campaign["verification_status"] == "pending_confirmation"
+    assert campaign["verified"] is True
+    assert campaign["verification_status"] == "verified"
+    assert campaign["verified_candidate_id"] is not None
+    assert campaign["verified_run_ids"]
+    assert campaign["trial_count"] >= 3
 
-    detail = client.get(f"/api/campaigns/{campaign_id}").json()
+    detail_response = client.get(
+        f"/api/campaigns/{campaign_id}"
+    )
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+
     assert detail["trials"]
-    assert any(t["phase"] == "probe" for t in detail["trials"])
+    assert detail["proposals"]
+    assert detail["verifications"]
+    assert detail["artifact"]["available"] is True
 
-    mem = client.get("/api/memory").json()
-    assert len(mem) >= 1
-    assert mem[0]["failure_class"] == "cuda_out_of_memory"
-    assert mem[0]["attempts"] >= 1
-    assert 0.0 <= mem[0]["success_rate"] <= 1.0
+    phases = {trial["phase"] for trial in detail["trials"]}
+    assert "probe" in phases
+    assert "full" in phases
+    assert "confirmation" in phases
+
+    memory_response = client.get("/api/memory")
+    assert memory_response.status_code == 200
+    memory = memory_response.json()
+
+    assert len(memory) >= 1
+    assert memory[0]["failure_class"] == "cuda_out_of_memory"
+    assert memory[0]["attempts"] >= 1
+    assert memory[0]["verified_recoveries"] >= 1
+    assert 0.0 <= memory[0]["success_rate"] <= 1.0
+    assert 0.0 <= memory[0]["verification_rate"] <= 1.0
 
 def test_settings_endpoint(client_and_ids):
     client, _, _, _ = client_and_ids
