@@ -11,6 +11,10 @@ function stopActivePoll() {
     activePollTimer = null;
   }
 }
+function formatCount(value, singular) {
+  const count = Number(value) || 0;
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
 
 function notify(message, kind = "success", timeout = 3200) {
   const region = document.getElementById("toast-region");
@@ -3856,7 +3860,7 @@ async function renderCampaignScreen(campaignId) {
           </p>
 
           <h1 class="page-title">
-            Campaign audit trail
+            Campaign
           </h1>
 
           <p class="page-subtitle">
@@ -3973,71 +3977,67 @@ async function renderCampaignScreen(campaignId) {
             : ""
         }
 
-        <section
-          class="campaign-stat-strip"
-          aria-label="Campaign summary"
-        >
-          <div class="campaign-stat">
-            <div class="campaign-stat-label">
-              Trials
-            </div>
+       <section
+  class="campaign-stat-strip"
+  aria-label="Campaign summary"
+>
+  <div class="campaign-stat">
+    <div class="campaign-stat-label">
+      Trials used
+    </div>
 
-            <div class="campaign-stat-value">
-              ${campaign.trial_count}
+    <div class="campaign-stat-value">
+      ${campaign.trial_count}
+      ${
+        maximumTrials !== null
+          ? ` / ${maximumTrials}`
+          : ""
+      }
+    </div>
+  </div>
 
-              ${
-                maximumTrials !== null
-                  ? ` / ${maximumTrials}`
-                  : ""
-              }
-            </div>
-          </div>
+  <div class="campaign-stat">
+    <div class="campaign-stat-label">
+      Runs by stage
+    </div>
 
-          <div class="campaign-stat">
-            <div class="campaign-stat-label">
-              Phase split
-            </div>
+    <div
+      class="campaign-stat-value"
+      style="font-size: 13px; line-height: 1.6;"
+    >
+      ${formatCount(phaseCounts.probe, "probe")} ·
+      ${formatCount(phaseCounts.full, "full trial")} ·
+      ${formatCount(phaseCounts.confirmation, "confirmation")}
+    </div>
+  </div>
 
-            <div
-              class="campaign-stat-value"
-              style="font-size:15px;"
-            >
-              ${phaseCounts.probe || 0}P ·
-              ${phaseCounts.full || 0}F ·
-              ${phaseCounts.confirmation || 0}C
-            </div>
-          </div>
+  <div class="campaign-stat">
+    <div class="campaign-stat-label">
+      GPU time used
+    </div>
 
-          <div class="campaign-stat">
-            <div class="campaign-stat-label">
-              GPU time
-            </div>
+    <div class="campaign-stat-value">
+      ${formatGpuTime(gpuSeconds)}
+      ${
+        maximumGpuSeconds !== null
+          ? ` / ${formatGpuTime(maximumGpuSeconds)}`
+          : ""
+      }
+    </div>
+  </div>
 
-            <div class="campaign-stat-value">
-              ${formatGpuTime(gpuSeconds)}
+  <div class="campaign-stat">
+    <div class="campaign-stat-label">
+      Recovery status
+    </div>
 
-              ${
-                maximumGpuSeconds !== null
-                  ? ` / ${formatGpuTime(
-                      maximumGpuSeconds
-                    )}`
-                  : ""
-              }
-            </div>
-          </div>
-
-          <div class="campaign-stat">
-            <div class="campaign-stat-label">
-              Verification
-            </div>
-
-            <div class="campaign-stat-value">
-              ${verificationBadge(
-                campaign.verification_status
-              )}
-            </div>
-          </div>
-        </section>
+    <div class="campaign-stat-value">
+      ${verificationBadge(
+        campaign.verification_status
+      )}
+    </div>
+  </div>
+</section>
 
         <section class="campaign-primary-grid">
           <article class="campaign-panel">
