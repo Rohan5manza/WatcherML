@@ -1,31 +1,48 @@
-"""WatcherML: a local-first recovery layer for ML experiments.
+"""WatcherML's public Python SDK.
 
-    import watcherml as watcher
-
-    with watcher.init(project="tomato-disease", config={"model": "resnet50", "lr": 2e-4}) as run:
-        run.set_dataset("./data/tomato")
-        ... training loop ...
-        run.log_metric("val_accuracy", 0.914)
-
-Every run leaves a receipt. Every failure leaves evidence. WatcherML helps you investigate failures and recover from them.
+WatcherML records ML runs, captures deterministic failure evidence, and runs
+bounded CUDA OOM recovery campaigns whose verdicts require independent
+confirmation.
 """
-from .recovery import RecoveryContract, recover_from_oom
-from .run import Run, init
-from .storage import Storage
+
+from ._version import __version__
 from .capsule_schema import CAPSULE_SCHEMA_VERSION
 from .entrypoint import TrainingEntrypoint, validate_entrypoint
-
-
-__version__ = "0.1.0"
+from .recovery import (
+    RecoveryPreparation,
+    RecoveryResult,
+    prepare_oom_recovery,
+    recover_from_oom,
+    run_prepared_recovery,
+)
+from .recovery_contract import (
+    InterventionPermissions,
+    MetricGuard,
+    RecoveryBudget,
+    RecoveryContract,
+    VerificationRequirements,
+    WorkloadIdentity,
+)
+from .run import Run, init
+from .storage import Storage
 
 __all__ = [
+    "__version__",
+    "CAPSULE_SCHEMA_VERSION",
     "init",
     "Run",
     "Storage",
-    "recover_from_oom",
-    "RecoveryContract",
-    "__version__",
     "TrainingEntrypoint",
-"validate_entrypoint",
-"CAPSULE_SCHEMA_VERSION"
+    "validate_entrypoint",
+    "MetricGuard",
+    "RecoveryBudget",
+    "VerificationRequirements",
+    "WorkloadIdentity",
+    "InterventionPermissions",
+    "RecoveryContract",
+    "RecoveryPreparation",
+    "RecoveryResult",
+    "prepare_oom_recovery",
+    "run_prepared_recovery",
+    "recover_from_oom",
 ]
