@@ -1,32 +1,91 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "watcherml"
-version = "0.1.0"
-description = "A local-first experiment flight recorder for notebook-first ML: captures code, environment, GPU/system state, and failure context needed to reproduce and debug every run."
+dynamic = ["version"]
+description = "Local-first deterministic CUDA OOM forensics and verified recovery campaigns for ML training."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Rohan Anil Marar" },
+]
+keywords = [
+    "machine-learning",
+    "mlops",
+    "pytorch",
+    "cuda",
+    "oom",
+    "experiment-tracking",
+    "failure-forensics",
+    "reproducibility",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: Jupyter",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Debuggers",
+]
 dependencies = [
     "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "httpx>=0.27"]
-notebook = ["ipython>=8.0"]
-ui = ["fastapi>=0.110", "uvicorn>=0.29"]
+notebook = [
+    "ipython>=8.0",
+]
+ui = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+dev = [
+    "build>=1.2",
+    "httpx>=0.27",
+    "pytest>=7.0",
+    "twine>=5.0",
+]
+
+[project.urls]
+Homepage = "https://watcherml.rohanmarar.com"
+Documentation = "https://watcherml.rohanmarar.com"
+Repository = "https://github.com/Rohan5manza/WatcherML"
+Issues = "https://github.com/Rohan5manza/WatcherML/issues"
 
 [project.scripts]
-watcher = "watcherml.cli:main" #shorter compatibility alias to main watcherml executable
-watcherml = "watcherml.cli:main" #primary CLI name
+watcher = "watcherml.cli:main"
+watcherml = "watcherml.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "watcherml._version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["watcherml*"]
 
 [tool.setuptools.package-data]
-watcherml = ["webstatic/*"]
+watcherml = [
+    "webstatic/*.html",
+    "webstatic/*.css",
+    "webstatic/*.js",
+    "webstatic/assets/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers"]

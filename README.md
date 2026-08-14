@@ -1,282 +1,499 @@
-# WatcherML
+WatcherML
 
-A local-first experiment flight recorder for notebook-first ML.
+Deterministic CUDA OOM forensics and verified recovery campaigns for ML training.
 
-Every experiment leaves a receipt. Every failure leaves evidence.
+WatcherML is a local-first Python SDK and CLI that records ML runs, freezes a
+structured evidence capsule when training fails with a CUDA out-of-memory
+error, proposes bounded interventions, executes candidates in fresh supervised
+subprocesses, and calls a recovery verified only after independent confirmation
+runs satisfy constraints declared before compute begins.
 
-WatcherML captures the code, environment, data fingerprint, and failure
-context needed to reproduce and debug every training run — without
-requiring Docker, a database, or an internet connection.
+It is a recovery layer, not another hosted experiment-tracking platform. Use it
+on its own with local SQLite storage, or keep using the rest of your ML stack
+alongside it.
 
-## Install (from this repo, for now)
+Manual retries can make a run pass. WatcherML records what failed, what was
+allowed to change, what was actually tested, and whether the recovery held up
+under confirmation.
 
-```bash
-pip install -e .
-```
+Status
 
-(Once published: `pip install watcherml`.)
+WatcherML 0.1.0 is an alpha release with one deliberately narrow, provable
+vertical: CUDA OOM capture and verified recovery.
 
-## Quickstart
+No LLM, API key, hosted account, or internet connection is required.
 
-```python
+No Docker container is required. Trials use fresh Python subprocesses on the
+current machine and environment.
+
+Recovery compute is launched through the SDK or CLI. The optional web UI is
+a local inspection surface.
+
+A successful probe or full trial is not automatically a verified recovery.
+
+Version 1 does not modify source code, datasets, or dependencies.
+
+Install
+
+pip install watcherml
+
+Optional surfaces:
+
+pip install "watcherml[notebook]"  # Jupyter/IPython support
+pip install "watcherml[ui]"        # local FastAPI web UI
+
+For development from a clone:
+
+python -m pip install -e ".[dev,notebook,ui]"
+
+WatcherML requires Python 3.10 or newer.
+
+1. Record a training run
+
 import watcherml as watcher
 
-with watcher.init(project="tomato-disease", config={"model": "resnet50", "lr": 2e-4}) as run:
+config = {
+    "model_name": "resnet50",
+    "batch_size": 32,
+    "gradient_accumulation_steps": 1,
+    "gradient_checkpointing": False,
+}
+
+with watcher.init(project="tomato-disease", config=config) as run:
     run.set_dataset("./data/tomato")
-    for step in range(epochs):
-        acc = train_one_epoch(...)
-        run.log_metric("val_accuracy", acc, step=step)
-```
 
-That's it — no Git repo setup, no DVC init, no manual instrumentation required
-to get your first recorded run. (Those tools remain available for teams that
-want stricter provenance; they are just no longer prerequisites for run #1.)
+    for step in range(100):
+        loss = train_step(config)
+        run.log_metric("training_loss", loss, step=step)
 
-At the end of a run you get a receipt like:
+    validation_loss = evaluate(config)
+    run.log_metric("validation_loss", validation_loss)
 
-```
-WatcherML run completed: tomato-disease-cc0441
+WatcherML stores run metadata, metrics, artifacts, environment information,
+Git state when available, hardware/resource context, and dataset fingerprints
+under ./.watcherml/ by default.
 
-val_accuracy       0.797
-duration           0m 0s
-git_state          clean
-dataset_fingerprint 912a76cd9cd0
-reproduction_score 9/10
+You can inspect the result without launching a server:
 
-Inspect: watcher inspect tomato-disease-cc0441
-```
+watcher runs --project tomato-disease
+watcher inspect RUN_ID
 
-If the run crashes, you get a **failure capsule** instead — deterministic
-diagnosis (CUDA OOM, NaN loss, shape mismatch, missing file, DataLoader
-worker crash, device mismatch, or dependency/CUDA incompatibility), plus the
-evidence behind it. No LLM or API key required for this to work; an optional
-LLM explanation can be layered on top later without becoming the source of
-truth.
+2. Capture deterministic OOM evidence
 
-## Notebook usage
+When the recorded block raises a CUDA OOM, WatcherML persists a versioned
+failure capsule instead of reducing the error to a traceback string.
 
-```
-%load_ext watcherml
-%watcher project tomato-disease
+WatcherML failure capsule v1.0: tomato-disease-a56b75
 
-import watcherml as watcher
-run = watcher.init(config={"model": "resnet50", "lr": 2e-4})   # project comes from %watcher
-run.log_metric("val_accuracy", 0.91, step=1)
-run.finish()   # marks success — or just let the notebook keep running
-```
+Exception: RuntimeError: CUDA out of memory
+Diagnosis: cuda_out_of_memory (deterministic rule)
+Capture completeness: 9/10
+Last recorded training state:
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  last_logged_step: 41
 
-No `with` block needed. If a later cell raises instead, WatcherML notices
-automatically and saves a failure capsule — that's the point: notebooks are
-run cell-by-cell, not inside one tidy `with` block, so recording has to work
-the way people actually iterate. Executed cell source and order are attached
-to the run and included in any failure capsule. Requires `pip install
-watcherml[notebook]` (just IPython).
+The capsule ties a deterministic classification to evidence such as:
 
-## Optional: local LLM advisor (Ollama)
+the original configuration;
 
-Everything above works with zero LLM involvement — the diagnosis and diff
-are always deterministic. If you also run [Ollama](https://ollama.com)
-locally (`ollama serve`, with a small model pulled — `ollama pull llama3.2`
-or similar), you can layer a plain-language explanation on top:
+the last recorded training state;
 
-```bash
-watcher inspect RUN_ID --advise          # explain a failure capsule
-watcher compare RUN_A RUN_B --advise     # "likely explanation" for what changed
-watcher advise RUN_ID                    # same as inspect --advise, standalone
-```
+exception type, message, and traceback;
 
-If Ollama isn't running, these just print a note and fall back to the
-deterministic output — nothing breaks, and nothing requires an API key.
+environment and Git information;
 
-## Optional: autopilot (bounded, opt-in iteration)
+GPU and resource state when available;
 
-```python
-from watcherml import autopilot
+code, dataset, and run identity information captured by the recorder.
 
-def train(config):
-    ...  # your training code, parameterized by config
-    return {"val_accuracy": acc}   # or raise, e.g. on CUDA OOM
+Inspect or export it:
 
-result = autopilot(
-    project="tomato-disease",
-    train_fn=train,
-    base_config={"model": "resnet50", "lr": 1e-3, "batch_size": 32},
-    goal_metric="val_accuracy",
-    goal_direction="maximize",
-    max_iterations=5,   # hard-capped at 10 regardless of what you pass
-)
-```
+watcher failures --project tomato-disease
+watcher inspect RUN_ID --format markdown --output failure.md
+watcher export RUN_ID --out failure-capsule.zip
 
-This runs your training function repeatedly, asking Ollama (or a
-deterministic fallback if Ollama isn't running — e.g. halving batch_size on
-OOM) what to try next after each iteration. **This is explicitly
-experimental and bounded, not a background agent:**
+The exported capsule is checksummed and portable. Its purpose is evidence and
+reproduction, not an AI-generated explanation.
 
-- every iteration is logged as a completely normal, independently
-  inspectable WatcherML run — nothing is hidden
-- it stops and tells you why (converged suggestion, unrecoverable failure,
-  or hitting the iteration cap) rather than looping indefinitely
-- it never modifies anything outside WatcherML's own storage, and never
-  deploys or promotes a result on its own
-- a handful of runs is not much evidence — treat the "best run" as a lead
-  worth reviewing yourself (`watcher inspect <best_run_id>`), not a decision
+3. Expose a serializable training entrypoint
 
-## Web UI
+Recovery trials must run in fresh processes. WatcherML therefore accepts an
+importable module:function entrypoint rather than an in-memory closure.
 
-```bash
-pip install watcherml[ui]
-watcher ui                # opens http://localhost:7331
-```
-
-A full redesign, built around one idea: **color and labels carry provenance,
-not just decoration.** Mint green means "verified" or "live," violet means
-"Ollama generated this, unverified," and everything computed deterministically
-gets a "calculated" or "rule-based" tag right next to it — so nothing an LLM
-said can quietly pass as fact.
-
-Sidebar: **Overview, Projects, Runs, Failures, Campaigns, Memory, Settings.**
-
-- **Overview** — real aggregated stats: total projects/runs, runs needing
-  attention (failed + unresolved), active recovery campaigns, GPU/Ollama
-  status, recent verified fixes
-- **Runs** (global, cross-project) — human-readable names
-  (`resnet50 — batch 32`, with inline rename + tagging), filterable by
-  status, with hardware, warning count, and failure category as real columns
-- **Run detail** — metrics, config, reproduction status, a real GPU/CPU
-  utilization trace, a lightweight event timeline (start/warnings/failure —
-  not full live monitoring yet, see `ROADMAP.md`), export-capsule download,
-  mark-as-resolved
-- **Failures** and **Failure capsule** — diagnosis with **evidence IDs**
-  (`EV-1, EV-2` linking a diagnosis to the specific evidence category behind
-  it), similarity-based nearest-successful-run comparison (not just "the
-  most recent success" — see below), action bar (Analyze locally / Compare
-  baseline / Create recovery campaign / Export capsule / Mark as resolved)
-- **Campaigns** — real trial lineage from `recover_from_oom`: agent
-  reasoning steps, an objective sparkline, a trial table with decision pills
-  (keep/accept/best/rejected) — nothing here is mockup content, it's your
-  actual recovery campaign data
-- **Memory** — cross-campaign resolution memory ("this failure signature,
-  this fix, verified in N/M matching attempts"), aggregated live from
-  `recovery_trials` — not a separately tracked concept, it falls out of data
-  you already have the moment more than one campaign has run
-- **Settings** — local data directory, Ollama status/host/model, GPU info
-
-Runs created by the bundled demo scripts are tagged `_simulated: true` in
-their config and show a **"Simulated OOM Scenario"** badge — real
-instrumented runs never get this badge.
-
-## Real nearest-successful-run selection
-
-Comparing a failure against "the last successful run" is misleading —
-recency isn't relevance. `compare_to_last_success` now scores every
-successful run in the project by a transparent, documented similarity
-weighting (dataset fingerprint, model architecture, GPU, Git ancestry,
-config distance, framework versions, temporal proximity — see
-`similarity.py` for the exact weights) and picks the best match, with a
-checklist explaining why: same dataset ✓, same GPU ✓, 11 of 13 config
-fields identical, etc. Config differences from that baseline are ranked too
-— known memory/throughput-sensitive keys (`batch_size`, `precision`,
-`sequence_length`, ...) surface first.
-
-## Optional: OOM Recovery Agent (experimental, narrow by design)
-
-```python
-import watcherml as watcher
+Create train.py:
 
 def train(config, max_steps=None):
-    # your training code -- max_steps lets the agent probe cheaply before
-    # committing to a full run; if you don't support it, full runs are used
-    # for probing too (safe, just not cheap)
-    ...
-    return {"val_accuracy": acc, "throughput_samples_per_sec": tp}
+    """Run bounded probe work or the complete configured workload."""
+    model, optimizer, train_loader = build_training_objects(config)
 
-report = watcher.recover_from_oom(
-    project="tomato-disease",
-    failed_run_id="tomato-disease-a56b75",   # a run that failed with CUDA OOM
-    train_fn=train,
-    contract=watcher.RecoveryContract(
-        goal_metric="val_accuracy",
-        max_trials=6,
-        probe_steps=30,
+    configured_steps = config.get("training_steps", 1_000)
+    steps_to_run = max_steps if max_steps is not None else configured_steps
+
+    for step, batch in enumerate(train_loader):
+        if step >= steps_to_run:
+            break
+        train_one_step(model, optimizer, batch, config)
+
+    validation_loss = evaluate(model, config)
+    return {
+        "validation_loss": validation_loss,
+        "steps_completed": steps_to_run,
+    }
+
+The entrypoint contract is important:
+
+config is the complete candidate configuration.
+
+max_steps=N means a probe must stop after at most N units of declared
+progress.
+
+Omitting max_steps means run the complete configured workload.
+
+The returned mapping must include every guarded metric and an integral
+progress metric such as steps_completed.
+
+The callable must be importable from the declared project root.
+
+WatcherML validates the entrypoint before starting campaign compute. It does
+not silently fall back to an unbounded in-process function.
+
+4. Declare recovery constraints before compute
+
+import watcherml as watcher
+
+verification = watcher.VerificationRequirements(
+    minimum_progress_steps=1_000,
+    metric_guards=(
+        watcher.MetricGuard(
+            name="validation_loss",
+            direction="minimize",
+            baseline_value=0.42,
+            max_regression=0.03,
+        ),
     ),
+    confirmation_runs=2,
 )
-```
 
-This is the first slice of a broader autonomous-recovery design, scoped
-deliberately to exactly one failure class. Given a run that failed with a
-CUDA OOM, it:
+budget = watcher.RecoveryBudget(
+    max_trials=7,
+    max_probe_trials=3,
+    max_full_trials=2,
+    probe_steps=30,
+    trial_timeout_seconds=3_600,
+    campaign_timeout_seconds=14_400,
+)
 
-1. **Observes** the failure capsule's evidence (facts only, no LLM)
-2. **Diagnoses** likely memory causes via Ollama, ranked with confidence
-   (falls back to a generic hypothesis if Ollama isn't running)
-3. **Plans** 2-3 candidate patches via Ollama, restricted to exactly six
-   keys: `batch_size`, `gradient_accumulation_steps`, `precision`,
-   `sequence_length`, `gradient_checkpointing`, `num_workers`
-4. **Validates** every proposed patch through a policy engine before
-   anything runs — any other key the LLM proposes is silently rejected and
-   counted, never executed
-5. **Probes** each candidate cheaply (short trials) and eliminates ones that
-   still OOM, before running survivors as full trials
-6. **Scores** survivors deterministically (success + goal metric +
-   throughput + VRAM headroom — a documented heuristic, not the LLM's
-   opinion) and reports which fix was actually verified
-7. **Remembers** every hypothesis, patch, and outcome — `watcher recoveries`
-   and `watcher recovery CAMPAIGN_ID` show the full audit trail, and every
-   trial is a completely normal, independently inspectable WatcherML run
+result = watcher.recover_from_oom(
+    "tomato-disease-a56b75",
+    "train:train",
+    verification,
+    budget=budget,
+    project_root=".",
+)
 
-Guardrails, on purpose: trial count is hard-capped regardless of what you
-ask for; this agent only ever touches config (never code, dependencies, or
-datasets — no git worktree isolation is needed yet because there's no code
-to isolate); and if you're on a single-GPU box, Ollama calls default to
-`keep_alive=0` so the model unloads immediately and a training trial gets
-the full card. The metrics your `train_fn` returns should be validation
-metrics — this agent picks a "best" by comparing candidates against each
-other on whatever you log, so if that's test-set performance you'll be
-optimizing against your test set by accident. Evaluate the winner against a
-test set once, separately, after the campaign ends.
+if result.verified:
+    print("Verified candidate:", result.verified_candidate_id)
+    print("Confirmation runs:", result.verified_run_ids)
+else:
+    print("No verified recovery:", result.campaign.stopped_reason)
 
-## CLI
+The contract seals:
 
-```bash
-watcher init                       # set up ./.watcherml (SQLite + local artifact store)
-watcher runs                       # list recorded runs
-watcher inspect RUN_ID [--advise]  # full detail or failure capsule for one run
-watcher failures                   # list every recorded failure
-watcher compare RUN_A RUN_B [--advise]   # structured diff: what changed, what improved
-watcher advise RUN_ID              # AI (Ollama) explanation for a past failure
-watcher export RUN_ID --format capsule   # portable reproduction bundle (.zip)
-watcher recoveries                 # list OOM recovery campaigns
-watcher recovery CAMPAIGN_ID        # full audit trail for one campaign
-```
+the source OOM run and its original configuration;
 
-## See it work end to end
+the serializable training entrypoint;
 
-```bash
-python examples/demo_story.py
-```
+probe, full-trial, timeout, and GPU-time budgets;
 
-This runs the full launch story: a CUDA-OOM-triggering run, a failure
-capsule, a fixed rerun, a structured comparison, and a reproduction capsule
-export — all in one script, no GPU required (it simulates the OOM condition
-so the diagnosis engine can be exercised anywhere).
+metric regression boundaries;
 
-## What v0.1 is (and isn't)
+minimum required progress;
 
-**In scope:** SDK + `init()`/context-manager run lifecycle, Git/environment/GPU
-capture, CPU/RAM/GPU background sampling, metric + artifact logging,
-deterministic failure classification, structured run diff, portable
-reproduction capsules, and a CLI.
+confirmation-run count;
 
+optional workload-identity and peak-VRAM requirements;
 
+the strongest intervention class the campaign may execute.
 
-## Two modes (server mode not yet implemented in this scaffold)
+The sum of reserved probe, full, and confirmation runs cannot exceed the total
+trial budget.
 
-- **Local mode** (implemented here): SQLite + local content-addressed
-  artifact directory. Fully offline. No Docker.
-- **Server mode** (planned): FastAPI + Postgres + S3/MinIO, for team/Buffy
-  deployments. See `ROADMAP.md`.
+Review the plan before spending compute
 
-## License
+For approval-sensitive workflows, separate zero-compute planning from campaign
+execution:
 
-MIT (change if you'd prefer Apache-2.0 — see `ROADMAP.md` security/launch
-checklist).
+preparation = watcher.prepare_oom_recovery(
+    "tomato-disease-a56b75",
+    "train:train",
+    verification,
+    budget=budget,
+    project_root=".",
+)
+
+print(preparation.to_json())
+
+authorizations = {}
+for proposal_id in preparation.approval_required_proposal_ids:
+    authorization = preparation.authorize(
+        proposal_id,
+        approved_by="rohan",
+        reason="Reviewed configuration and semantic impact.",
+    )
+    authorizations[proposal_id] = authorization
+
+result = watcher.run_prepared_recovery(
+    preparation,
+    authorizations=authorizations,
+    project_root=".",
+)
+
+Automatic low-risk interventions require no approval. Broader interventions
+must be explicitly permitted by the campaign contract and authorized for the
+specific visible proposal. --yes confirms execution in the CLI; it never
+grants proposal authorization.
+
+What happens during a recovery campaign
+
+Validate source evidence. Confirm that the referenced run contains a
+valid deterministic CUDA OOM capsule.
+
+Discover capabilities. Determine which typed configuration changes the
+entrypoint and workload can represent.
+
+Plan bounded interventions. Generate deterministic proposals backed by
+explicit OOM policy rules.
+
+Enforce scope. Reject unknown keys, invalid values, semantic changes, or
+higher-risk proposals that exceed the sealed contract and authorization.
+
+Run probes. Launch short trials in fresh supervised subprocesses and
+eliminate candidates that still OOM, time out, violate protocol, or fail to
+make the declared progress.
+
+Run full trials. Execute surviving candidates against the complete
+entrypoint workload.
+
+Rank feasible candidates. Reject constraint violations first, then rank
+only candidates that completed and satisfied declared requirements.
+
+Verify independently. Rerun the selected candidate for the required
+confirmation count and check progress, metrics, workload identity, resource
+limits, process evidence, and artifact integrity.
+
+Persist the audit trail. Store proposals, rejected changes, subprocess
+evidence, trial lineage, ranking, verification checks, and the immutable
+campaign artifact.
+
+Only step 8 can produce a verified recovery verdict.
+
+Probe, full trial, and confirmation run
+
+Phase
+
+Purpose
+
+Work performed
+
+Can prove recovery?
+
+Probe
+
+Reject obviously bad candidates cheaply
+
+Entrypoint called with max_steps=probe_steps
+
+No
+
+Full trial
+
+Evaluate a surviving candidate
+
+Complete configured workload
+
+No
+
+Confirmation
+
+Independently verify the selected candidate
+
+Complete workload repeated as declared
+
+Yes, collectively
+
+Every phase consumes campaign budget. WatcherML does not make GPU computation
+free; it makes the computation bounded, inspectable, comparable, and harder to
+misrepresent.
+
+CLI-first workflow
+
+watcher init
+watcher doctor
+watcher runs --project tomato-disease
+watcher inspect RUN_ID
+watcher failures --unresolved
+watcher compare RUN_A RUN_B
+watcher export RUN_ID --out failure-capsule.zip
+
+Prepare a sealed plan without launching trials:
+
+watcher prepare-recovery RUN_ID \
+  --entrypoint train:train \
+  --project-root . \
+  --metric validation_loss:minimize:0.42:0.03 \
+  --minimum-progress-steps 1000 \
+  --confirmation-runs 2 \
+  --max-probe-trials 3 \
+  --max-full-trials 2 \
+  --probe-steps 30 \
+  --out recovery-plan.json
+
+Review and execute it:
+
+watcher recover --plan recovery-plan.json
+watcher recoveries --project tomato-disease
+watcher recovery CAMPAIGN_ID
+
+Interactive terminals receive progress steps, spinners, tables, sparklines,
+colors, and explicit review prompts. Redirected output and CI receive stable
+plain text. Most inspection commands support --format json; --no-color and
+--quiet are available as top-level CLI flags.
+
+This makes the CLI suitable for SSH sessions and hosted notebooks such as
+Google Colab:
+
+!watcher --no-color runs --format json
+!watcher --no-color inspect RUN_ID --format json
+
+Optional local web UI
+
+pip install "watcherml[ui]"
+watcher ui
+
+The UI runs locally at http://127.0.0.1:7331 and presents runs, metrics,
+failure evidence, recovery proposals, isolated trials, confirmation checks,
+campaign artifacts, and resolution memory.
+
+Recovery truth remains verifier-owned: the UI cannot manually turn a failed run
+into a verified recovery. Launch recovery compute through the SDK or CLI.
+
+Local storage
+
+By default WatcherML creates:
+
+.watcherml/
+├── watcher.db       # SQLite metadata, metrics, capsules, and campaign lineage
+└── artifacts/       # local content-addressed artifacts
+
+Set WATCHERML_DIR or use the CLI's top-level --data-dir option to choose a
+different location. Existing databases are migrated in place without deleting
+recorded rows.
+
+Why use this instead of manually changing the batch size?
+
+For a cheap one-off experiment with an obvious fix, manually reducing the batch
+size may be faster. WatcherML is useful when the recovery must be reviewable and
+repeatable across people, machines, notebooks, CI jobs, or expensive training
+runs.
+
+It provides evidence that manual retries usually do not:
+
+the exact failed workload and environment;
+
+an immutable declaration of allowed changes and compute limits;
+
+rejected as well as executed proposals;
+
+fresh-process trial evidence and timeout supervision;
+
+metric-regression and progress constraints chosen before seeing results;
+
+repeated confirmation rather than one lucky successful run;
+
+a machine-readable artifact that another engineer can audit.
+
+WatcherML is not valuable because it knows that smaller batches use less
+memory. It is valuable because it turns an informal debugging sequence into a
+bounded recovery protocol with a defensible verdict.
+
+WatcherML and experiment trackers
+
+WatcherML 0.1.0 is not trying to replace the dashboards, collaboration,
+artifact registries, or hosted services provided by MLflow and Weights &
+Biases. Its v1 responsibility is narrower: failure evidence and verified local
+recovery.
+
+Native tracker integrations are planned after the core recovery protocol is
+stable. Until then, WatcherML can record beside an existing tracker, but the
+README does not claim first-class MLflow or W&B synchronization.
+
+Scope and limitations of 0.1.0
+
+Implemented:
+
+local run, metric, artifact, environment, Git, dataset, and resource capture;
+
+deterministic versioned failure capsules;
+
+structured run comparison and portable capsule export;
+
+serializable training-entrypoint validation;
+
+fresh subprocess trial execution with parent-side timeouts;
+
+capability discovery and typed bounded interventions;
+
+deterministic CUDA OOM policy planning;
+
+immutable recovery contracts and explicit authorization boundaries;
+
+probe, full, and confirmation campaign orchestration;
+
+constraint-first candidate ranking;
+
+independent confirmation verification;
+
+SQLite persistence, CLI inspection, and optional local web UI.
+
+Not implemented or deliberately excluded from v1:
+
+automatic source-code, dataset, or dependency modification;
+
+Docker/container isolation for each trial;
+
+distributed multi-node campaign scheduling;
+
+hosted team accounts or a remote control plane;
+
+recovery classes other than CUDA OOM;
+
+LLM diagnosis, autopilot, or open-ended autonomous iteration;
+
+first-class MLflow or Weights & Biases synchronization.
+
+Development
+
+git clone https://github.com/Rohan5manza/WatcherML.git
+cd WatcherML
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev,notebook,ui]"
+python -m pytest -q
+
+Build and validate release artifacts:
+
+python -m build
+python -m twine check dist/*
+
+Security and bug reports
+
+Please report bugs through the
+GitHub issue tracker.
+Do not include secrets, proprietary datasets, or sensitive environment values
+in public issue attachments.
+
+License
+
+WatcherML is released under the MIT License.

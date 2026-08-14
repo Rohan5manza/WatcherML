@@ -1200,6 +1200,7 @@ const routes = [
   [/^#\/failures$/, "failures", renderFailuresScreen],
   [/^#\/campaigns$/, "campaigns", renderCampaignsScreen],
   [/^#\/memory$/, "memory", renderMemoryScreen],
+  [/^#\/guide$/, "guide", renderGuideScreen],
   [/^#\/settings$/, "settings", renderSettingsScreen],
   [
     /^#\/project\/([^/]+)$/,
@@ -2379,7 +2380,11 @@ async function renderFailureScreen(runId) {
             evidenceIndex[evidenceId] || ""
           )}"
         >
-          ${esc(evidenceId)}
+          <strong>${esc(evidenceId)}</strong>
+          <span>${esc(
+            evidenceIndex[evidenceId] ||
+              "Recorded evidence"
+          )}</span>
         </span>
       `
     )
@@ -3899,6 +3904,12 @@ async function renderCampaignScreen(campaignId) {
               Copy campaign ID
             </button>
 
+            <a href="#/guide">
+              <button class="ghost">
+                Explain this page
+              </button>
+            </a>
+
             ${
               campaign.artifact?.available
                 ? `
@@ -4524,6 +4535,254 @@ async function renderMemoryScreen() {
       })
       .join("")}
   `;
+}
+
+// -------------------- beginner guide --------------------
+
+function renderGuideScreen() {
+  const evidenceGroups = [
+    ["EV-1", "Run configuration", "The training settings recorded with the failed run, such as batch size, precision, sequence length, and gradient accumulation."],
+    ["EV-2", "Last training state", "Where training had reached and the latest state WatcherML recorded before the exception."],
+    ["EV-3", "Runtime context", "Process and runtime facts that describe how the failed execution was running."],
+    ["EV-4", "Resource state", "CPU, RAM, and sampled GPU-resource information around the failure."],
+    ["EV-5", "GPU and driver", "The accelerator model, available memory, driver, and other GPU identity information."],
+    ["EV-6", "Framework and allocator", "Python/framework details plus any captured CUDA allocator state."],
+    ["EV-7", "Git state", "The repository revision and whether local source changes were present."],
+    ["EV-8", "Environment", "The Python and package-environment fingerprint used by the run."],
+    ["EV-9", "Dataset", "The recorded dataset fingerprint used to detect workload drift."],
+    ["EV-10", "Recent metrics", "The last metric values recorded before the run failed."],
+    ["EV-11", "Notebook history", "Available Jupyter or IPython execution history for notebook-first runs."],
+  ];
+
+  const glossary = [
+    ["Run", "One recorded execution of training. Every probe, full trial, and confirmation receives its own run ID so it can be inspected independently."],
+    ["Failure capsule", "A versioned snapshot created when training fails. It contains the exception, deterministic classification, and the evidence that was actually available at failure time."],
+    ["Training entrypoint", "An importable Python function that can rebuild and run the workload from declared configuration. WatcherML needs it so a trial can start in a fresh process instead of reusing notebook memory."],
+    ["Capability manifest", "A declaration of which configuration or environment controls the entrypoint genuinely supports. Unsupported changes are rejected before they can become trials."],
+    ["Recovery campaign", "One bounded investigation attached to one source OOM. It records the sealed contract, proposals, isolated trials, ranking, confirmations, and final stopping reason."],
+    ["Recovery contract", "The immutable rules agreed before GPU work begins: workload identity, allowed authority, trial and time budgets, progress requirements, metric limits, VRAM limits, and confirmation count."],
+    ["Proposal", "A deterministic policy suggestion for a specific, typed change. A proposal cites evidence and spends no GPU by itself."],
+    ["Intervention", "A proposal after validation, authorization, and materialization into exact trial inputs. Examples include lowering per-device batch size or enabling gradient checkpointing."],
+    ["Candidate ID", "The identity of one proposed recovery configuration. The same candidate ID should appear in its probe, full trial, and confirmations because those runs are testing the same intervention."],
+    ["Trial / run ID", "A single fresh-process execution of a candidate. Run IDs must be different across attempts; repeated IDs would not count as independent evidence."],
+    ["Probe", "A short, bounded execution used to reject candidates that still fail quickly. Surviving a probe means only “worth testing further,” not “recovered.”"],
+    ["Full trial", "A longer candidate execution evaluated against the contract’s progress, metric, workload, and memory requirements. A successful full trial is still provisional."],
+    ["Provisional ranking", "A constraint-first ordering of eligible full-trial candidates. It decides which candidate is worth confirming first; it cannot declare recovery and is not an opaque weighted score."],
+    ["Confirmation run", "A new isolated execution of the exact selected candidate under the same sealed contract and workload identity. More than one is normally required."],
+    ["Verifier", "The deterministic component that checks confirmation count, uniqueness, identity bindings, exit status, absence of OOM, progress, metrics, and VRAM constraints. It is the only component allowed to declare recovery."],
+    ["Verified recovery", "The final claim produced only when every required verifier check passes across distinct confirmation executions. It means repeatable under the declared contract—not universally guaranteed for every future workload."],
+  ];
+
+  app.innerHTML = `
+    <div class="guide-page">
+      <p class="eyebrow">watcherml / guide</p>
+
+      <section class="guide-hero">
+        <div>
+          <span class="guide-kicker">START HERE</span>
+          <h1 class="page-title">How to read WatcherML</h1>
+          <p class="guide-lede">
+            WatcherML turns one captured CUDA out-of-memory failure into a
+            controlled sequence of experiments. It does not merely find a run
+            that happens to pass: it records what changed and requires fresh,
+            independent evidence before calling the recovery verified.
+          </p>
+
+          <div class="guide-actions">
+            <a href="#/failures"><button>Open failure capsules</button></a>
+            <a href="#/campaigns"><button class="primary">Open recovery campaigns</button></a>
+          </div>
+        </div>
+
+        <aside class="guide-trust-card">
+          <span class="guide-trust-icon" aria-hidden="true">✓</span>
+          <div>
+            <strong>The rule to remember</strong>
+            <p>A probe can reject. A full trial can nominate. Only the verifier can prove recovery.</p>
+          </div>
+        </aside>
+      </section>
+
+      <nav class="guide-jump" aria-label="Guide sections">
+        <button type="button" data-guide-target="guide-flow">The complete flow</button>
+        <button type="button" data-guide-target="guide-status">What statuses mean</button>
+        <button type="button" data-guide-target="guide-evidence">EV evidence IDs</button>
+        <button type="button" data-guide-target="guide-glossary">Glossary</button>
+        <button type="button" data-guide-target="guide-gpu">GPU cost</button>
+      </nav>
+
+      <section class="guide-section" id="guide-flow">
+        <div class="guide-heading">
+          <div>
+            <span class="guide-kicker">THE COMPLETE FLOW</span>
+            <h2>From one OOM to a defensible verdict</h2>
+          </div>
+          <p>Each box has a deliberately limited job. Later steps cannot rewrite what earlier steps recorded.</p>
+        </div>
+
+        <div class="guide-flow" role="list" aria-label="WatcherML recovery flow">
+          <article class="guide-flow-step" role="listitem">
+            <span class="guide-flow-number">01</span>
+            <div><strong>OOM captured</strong><p>The original exception still reaches your code, while WatcherML persists the failure and surrounding evidence.</p></div>
+            <span class="guide-cost no-gpu">no extra GPU</span>
+          </article>
+          <article class="guide-flow-step" role="listitem">
+            <span class="guide-flow-number">02</span>
+            <div><strong>Capsule sealed</strong><p>A stable schema preserves evidence groups as EV IDs, allowing later decisions to cite the exact facts they used.</p></div>
+            <span class="guide-cost no-gpu">no extra GPU</span>
+          </article>
+          <article class="guide-flow-step" role="listitem">
+            <span class="guide-flow-number">03</span>
+            <div><strong>Contract and proposals prepared</strong><p>Budgets, workload identity, acceptable metrics, confirmation count, and allowed authority are fixed before trials start.</p></div>
+            <span class="guide-cost no-gpu">no extra GPU</span>
+          </article>
+          <article class="guide-flow-step" role="listitem">
+            <span class="guide-flow-number">04</span>
+            <div><strong>Probes eliminate</strong><p>Short fresh-process runs cheaply reject candidates that still OOM, crash, time out, or violate their execution contract.</p></div>
+            <span class="guide-cost short-gpu">short GPU runs</span>
+          </article>
+          <article class="guide-flow-step" role="listitem">
+            <span class="guide-flow-number">05</span>
+            <div><strong>Full trials qualify</strong><p>Probe survivors run for the contract’s required workload and produce comparable progress, metric, and memory evidence.</p></div>
+            <span class="guide-cost full-gpu">full GPU run</span>
+          </article>
+          <article class="guide-flow-step provisional-step" role="listitem">
+            <span class="guide-flow-number">06</span>
+            <div><strong>Ranking schedules confirmation</strong><p>Eligible candidates are ordered by declared preferences. The winner is promising, but it is explicitly not verified yet.</p></div>
+            <span class="guide-cost no-gpu">no extra GPU</span>
+          </article>
+          <article class="guide-flow-step verified-step" role="listitem">
+            <span class="guide-flow-number">07</span>
+            <div><strong>Independent confirmations verify</strong><p>Distinct fresh executions repeat the exact candidate. The verifier checks every declared condition and owns the final verdict.</p></div>
+            <span class="guide-cost confirm-gpu">repeated GPU runs</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="guide-section" id="guide-status">
+        <div class="guide-heading">
+          <div>
+            <span class="guide-kicker">THE STATUS LADDER</span>
+            <h2>Success does not always mean verified</h2>
+          </div>
+          <p>Read the phase together with the status. The word “success” describes one execution; “verified” describes accumulated evidence.</p>
+        </div>
+
+        <div class="guide-status-ladder">
+          <article><span>1</span><strong>Proposed</strong><p>The change is valid and within policy. It has not run.</p><em>no recovery claim</em></article>
+          <article><span>2</span><strong>Probe success</strong><p>The candidate survived a short run.</p><em>not a full recovery</em></article>
+          <article class="provisional"><span>3</span><strong>Full success</strong><p>The full trial completed and may be ranked.</p><em>provisional only</em></article>
+          <article class="verified"><span>4</span><strong>Verified</strong><p>Distinct confirmations passed every contract check.</p><em>recovery may be claimed</em></article>
+        </div>
+
+        <div class="guide-callout">
+          <strong>Why can one candidate ID appear several times?</strong>
+          <p>The candidate ID identifies the intervention. Each row’s different run ID identifies a new execution of it. Seeing the same candidate in probe, full, and confirmation phases is correct; seeing the same run ID reused would not be independent evidence.</p>
+        </div>
+      </section>
+
+      <section class="guide-section" id="guide-evidence">
+        <div class="guide-heading">
+          <div>
+            <span class="guide-kicker">EVIDENCE, NOT ERROR CODES</span>
+            <h2>What EV-1, EV-2, and the other IDs mean</h2>
+          </div>
+          <p>An EV ID is a stable pointer to one category in the failure capsule. It is not a severity, confidence score, or generated explanation.</p>
+        </div>
+
+        <div class="evidence-guide-grid">
+          ${evidenceGroups.map(([id, label, explanation]) => `
+            <article class="evidence-guide-card">
+              <span>${id}</span>
+              <div><strong>${label}</strong><p>${explanation}</p></div>
+            </article>
+          `).join("")}
+        </div>
+
+        <div class="guide-callout subtle">
+          <strong>Why are some EV numbers missing on a capsule?</strong>
+          <p>WatcherML shows only evidence that was actually captured. The numbers stay fixed across runs, so EV-5 always means GPU information even when EV-3 or EV-4 is unavailable.</p>
+        </div>
+      </section>
+
+      <section class="guide-section" id="guide-glossary">
+        <div class="guide-heading">
+          <div>
+            <span class="guide-kicker">PLAIN-LANGUAGE GLOSSARY</span>
+            <h2>The terms used throughout the UI</h2>
+          </div>
+          <p>These definitions describe WatcherML v1’s deterministic CUDA OOM recovery boundary.</p>
+        </div>
+
+        <div class="guide-glossary-grid">
+          ${glossary.map(([term, definition]) => `
+            <details class="guide-term">
+              <summary><span>${term}</span><i aria-hidden="true">+</i></summary>
+              <p>${definition}</p>
+            </details>
+          `).join("")}
+        </div>
+      </section>
+
+      <section class="guide-section" id="guide-gpu">
+        <div class="guide-heading">
+          <div>
+            <span class="guide-kicker">COMPUTE ACCOUNTING</span>
+            <h2>Which parts actually use the GPU?</h2>
+          </div>
+          <p>The campaign budget counts attempted trials, including failures and confirmation runs. Planning and viewing evidence do not train a model.</p>
+        </div>
+
+        <div class="panel guide-table-panel">
+          <div class="runs-table-wrapper">
+            <table class="runs-table guide-table">
+              <thead><tr><th>part</th><th>GPU work</th><th>purpose</th><th>what it proves</th></tr></thead>
+              <tbody>
+                <tr><td>Capsule capture</td><td>None beyond the failing run</td><td>Preserve failure evidence</td><td>What was observed</td></tr>
+                <tr><td>Contract and policy</td><td>None</td><td>Bound authority and prepare proposals</td><td>What is allowed</td></tr>
+                <tr><td>Probe</td><td>Short bounded execution</td><td>Eliminate immediate failures cheaply</td><td>Only that the candidate survived the probe</td></tr>
+                <tr><td>Full trial</td><td>Longer declared workload</td><td>Collect comparable candidate evidence</td><td>Eligibility for provisional ranking</td></tr>
+                <tr><td>Confirmation</td><td>One full execution per required confirmation</td><td>Repeat the selected candidate independently</td><td>Recovery, if every verifier check passes</td></tr>
+                <tr><td>WatcherML UI</td><td>None</td><td>Read persisted records and artifacts</td><td>Nothing new; it displays existing evidence</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="guide-section guide-read-campaign">
+        <div class="guide-heading">
+          <div>
+            <span class="guide-kicker">READING A CAMPAIGN PAGE</span>
+            <h2>Five questions to ask in order</h2>
+          </div>
+        </div>
+
+        <ol class="guide-checklist">
+          <li><span>01</span><div><strong>Was the correct source OOM captured?</strong><p>Open the source failure and read the capsule’s exception, classification, and evidence labels.</p></div></li>
+          <li><span>02</span><div><strong>What changes were permitted?</strong><p>Inspect the sealed contract, capability manifest, proposal authorization, budgets, and workload identity.</p></div></li>
+          <li><span>03</span><div><strong>Which candidates failed or survived?</strong><p>Read phase, status, intervention, progress, VRAM, and run ID together—not just the green or red badge.</p></div></li>
+          <li><span>04</span><div><strong>Why was a candidate confirmed first?</strong><p>The provisional ranking should show contract eligibility and the declared lexicographic preference order.</p></div></li>
+          <li><span>05</span><div><strong>Did independent verification pass?</strong><p>Require the declared number of distinct confirmation run IDs and a verified report whose checks all pass.</p></div></li>
+        </ol>
+
+        <div class="guide-final-rule">
+          <span aria-hidden="true">W</span>
+          <p><strong>Do not stop reading at “full success.”</strong> The authoritative end state is the campaign verification report: <code>verified</code> with stopped reason <code>verified_recovery</code>.</p>
+        </div>
+      </section>
+    </div>
+  `;
+
+  document
+    .querySelectorAll("[data-guide-target]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        document
+          .getElementById(button.dataset.guideTarget)
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
 }
 
 // -------------------- settings --------------------

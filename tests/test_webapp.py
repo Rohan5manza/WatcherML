@@ -1,3 +1,6 @@
+
+
+
 """Tests for the local web UI's JSON API, using FastAPI's TestClient
 (no real socket/server needed -- safe for CI)."""
 import pytest
@@ -40,6 +43,20 @@ def test_index_and_static_assets_are_served(client_and_ids):
     assert client.get("/").status_code == 200
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/styles.css").status_code == 200
+
+
+def test_beginner_guide_is_packaged_with_the_local_ui(client_and_ids):
+    client, _, _, _ = client_and_ids
+    index = client.get("/").text
+    javascript = client.get("/static/app.js").text
+    stylesheet = client.get("/static/styles.css").text
+
+    assert 'href="#/guide"' in index
+    assert 'data-route="guide"' in index
+    assert "renderGuideScreen" in javascript
+    assert "What EV-1, EV-2, and the other IDs mean" in javascript
+    assert "Only the verifier can prove recovery" in javascript
+    assert ".guide-flow-step" in stylesheet
 
 
 def test_list_projects(client_and_ids):
