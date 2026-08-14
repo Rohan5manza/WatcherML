@@ -1,0 +1,92 @@
+name: Publish WatcherML to PyPI
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build release distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check --strict dist/*
+
+      - name: Verify release version matches tag
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected_version = tag.removeprefix("v")
+          artifacts = sorted(path.name for path in Path("dist").iterdir())
+
+          expected_wheel_prefix = f"watcherml-{expected_version}-"
+          expected_sdist = f"watcherml-{expected_version}.tar.gz"
+
+          if not any(
+              name.startswith(expected_wheel_prefix)
+              and name.endswith(".whl")
+              for name in artifacts
+          ):
+              raise SystemExit(
+                  f"No wheel matches release tag {tag!r}: {artifacts}"
+              )
+
+          if expected_sdist not in artifacts:
+              raise SystemExit(
+                  f"Missing {expected_sdist!r}: {artifacts}"
+              )
+
+          print(f"Release tag {tag} matches built package version.")
+          print("Artifacts:", *artifacts, sep="\n- ")
+
+      - name: Store release distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish release to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/watcherml
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download release distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
