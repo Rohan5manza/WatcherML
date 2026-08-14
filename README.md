@@ -1,7 +1,7 @@
 # WatcherML
 
-[![PyPI](https://img.shields.io/pypi/v/watcherml.svg)](https://pypi.org/project/watcherml/)
-[![Python](https://img.shields.io/pypi/pyversions/watcherml.svg)](https://pypi.org/project/watcherml/)
+[![PyPI](https://img.shields.io/pypi/v/watcherml.svg?cacheSeconds=300&v=1)](https://pypi.org/project/watcherml/)
+[![Python](https://img.shields.io/pypi/pyversions/watcherml.svg?cacheSeconds=300&v=1)](https://pypi.org/project/watcherml/)
 [![CI](https://github.com/Rohan5manza/WatcherML/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohan5manza/WatcherML/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
