@@ -5,8 +5,19 @@ on:
     types:
       - published
 
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish"
+        required: true
+        default: "v0.1.0"
+        type: string
+
 permissions:
   contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
 
 jobs:
   build:
@@ -14,8 +25,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out release
+      - name: Check out release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,24 +44,27 @@ jobs:
       - name: Validate distribution metadata
         run: python -m twine check --strict dist/*
 
-      - name: Verify release version matches tag
-        shell: python
+      - name: Verify package version matches release tag
+        shell: bash
         run: |
+          python - <<'PY'
           import os
           from pathlib import Path
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["RELEASE_TAG"]
           expected_version = tag.removeprefix("v")
           artifacts = sorted(path.name for path in Path("dist").iterdir())
 
           expected_wheel_prefix = f"watcherml-{expected_version}-"
           expected_sdist = f"watcherml-{expected_version}.tar.gz"
 
-          if not any(
+          wheel_found = any(
               name.startswith(expected_wheel_prefix)
               and name.endswith(".whl")
               for name in artifacts
-          ):
+          )
+
+          if not wheel_found:
               raise SystemExit(
                   f"No wheel matches release tag {tag!r}: {artifacts}"
               )
@@ -58,8 +74,11 @@ jobs:
                   f"Missing {expected_sdist!r}: {artifacts}"
               )
 
-          print(f"Release tag {tag} matches built package version.")
-          print("Artifacts:", *artifacts, sep="\n- ")
+          print(f"Release tag {tag} matches the package version.")
+          print("Artifacts:")
+          for artifact in artifacts:
+              print(f"- {artifact}")
+          PY
 
       - name: Store release distributions
         uses: actions/upload-artifact@v4
